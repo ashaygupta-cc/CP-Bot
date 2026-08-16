@@ -64,7 +64,7 @@ class CodeChefAdapter(PlatformAdapter):
             ))
         return results
 
-    async def check_solved(self, handle: str, problem_id: str, since_ts: float) -> tuple[bool, str]:
+    async def check_solved(self, handle: str, problem_id: str, since_ts: float, until_ts: float = None) -> tuple[bool, str]:
         """
         Checks recent submissions for an AC on the given problem.
         Limitation: no timestamps available from this endpoint,

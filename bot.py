@@ -1,5 +1,5 @@
 """
-bot.py — Entry point (v3)
+bot.py — Entry point (v4)
 Prefix changed to /  ·  Cogs: registry, admin, problems, checker,
 leaderboard, submissions, reset, points
 """
@@ -57,94 +57,173 @@ async def on_command_error(ctx, error):
 async def help_cmd(ctx, section: str = None):
     """Show all commands."""
 
-    embed = discord.Embed(
-        title="📖  CP Practice Bot  —  Command Reference",
+    # ── Header ────────────────────────────────────────────────────────────────
+    header = discord.Embed(
+        title="",
         description=(
-            "*A competitive programming tracker with multi-platform support.*\n"
-            f"Prefix: `{config.PREFIX}`"
+            "```ansi\n"
+            "\u001b[1;33m ██████╗██████╗\u001b[0m\n"
+            "\u001b[1;33m██╔════╝██╔══██╗\u001b[0m\n"
+            "\u001b[1;32m██║     ██████╔╝\u001b[0m\n"
+            "\u001b[1;32m██║     ██╔═══╝\u001b[0m\n"
+            "\u001b[1;36m╚██████╗██║\u001b[0m\n"
+            "\u001b[1;36m ╚═════╝╚═╝\u001b[0m\n"
+            "\n"
+            "\u001b[1;33m ██████╗  ██████╗ ████████╗\u001b[0m\n"
+            "\u001b[1;33m██╔══██╗██╔═══██╗╚══██╔══╝\u001b[0m\n"
+            "\u001b[1;32m██████╔╝██║   ██║   ██║   \u001b[0m\n"
+            "\u001b[1;32m██╔══██╗██║   ██║   ██║   \u001b[0m\n"
+            "\u001b[1;36m██████╔╝╚██████╔╝   ██║   \u001b[0m\n"
+            "\u001b[1;36m╚═════╝  ╚═════╝    ╚═╝   \u001b[0m\n"
+            "```\n"
+            "> 🏆  Competitive Programming Practice Tracker\n"
+            "> Multi-platform · Daily/Weekly/Monthly leaderboards\n"
+            f"\n"
+            f"```\n"
+            f"  Prefix    {config.PREFIX}\n"
+            f"  Platforms cf  ·  lc  ·  cc  ·  atcoder\n"
+            f"```"
         ),
         color=0x5865F2,
     )
-    embed.set_thumbnail(url=bot.user.display_avatar.url)
+    header.set_author(name="CP Practice Bot  —  Command Reference",
+                      icon_url=bot.user.display_avatar.url)
+    header.set_thumbnail(url=bot.user.display_avatar.url)
 
-    embed.add_field(
-        name="👤  Registration",
-        value=(
-            "`!register <platform> <handle>` — Link your CP handle\n"
-            "`!unregister <platform>` — Unlink a handle\n"
-            "`!profile [@user]` — View handles & point stats\n"
-            "`!handles [platform]` — List all registered members"
+    # ── Registration ──────────────────────────────────────────────────────────
+    reg = discord.Embed(title="👤  Registration", color=0x7289DA)
+    reg.add_field(name="\u200b", value=(
+        "```\n"
+        "!register <platform> <handle>   Link your handle\n"
+        "!unregister <platform>          Remove a handle\n"
+        "!profile [@user]                View handles + points\n"
+        "!handles [platform]             List all members\n"
+        "```"
+    ), inline=False)
+
+    # ── Problems ──────────────────────────────────────────────────────────────
+    problems = discord.Embed(title="📅  Problems", color=0x57F287)
+    problems.add_field(name="🙋  Member", value=(
+        "```\n"
+        "!problems    This week's schedule, grouped by day\n"
+        "```"
+    ), inline=False)
+    problems.add_field(name="🔒  Admin only", value=(
+        "```\n"
+        "!addproblem <plat> <id> <diff> <date> [pts]\n"
+        "!rius <id>           Safely remove problem (blocked if already solved)\n"
+        "!removeproblem <id> [keep_history]\n"
+        "!setdifficulty <id> <diff>\n"
+        "```"
+    ), inline=False)
+
+    # ── Solve Checking ────────────────────────────────────────────────────────
+    checking = discord.Embed(title="🔍  Solve Checking", color=0xFEE75C)
+    checking.add_field(name="🙋  Member", value=(
+        "```\n"
+        "!check [@user]                  Check today's solve status\n"
+        "!submissions <plat> [n] [@user] Browse recent submissions\n"
+        "```"
+    ), inline=False)
+    checking.add_field(name="🔒  Admin only", value=(
+        "```\n"
+        "!checkall    Bulk-check all members at once\n"
+        "```"
+    ), inline=False)
+    checking.add_field(name="⏱️  Auto-check schedule", value=(
+        "```\n"
+        "23:45 IST   Auto-checkall (slow/safe mode)\n"
+        "Every 6 h   Silent background point award\n"
+        "```\n"
+        "> 💡 **Tip:** `!check` is instant and preferred — auto is just a safety net."
+    ), inline=False)
+
+    # ── Leaderboards ──────────────────────────────────────────────────────────
+    lb = discord.Embed(title="🏆  Leaderboards", color=0xF1C40F)
+    lb.add_field(name="\u200b", value=(
+        "```\n"
+        "!leaderboard           Daily + Weekly + Monthly in one view\n"
+        "!lbfull [scope]        Admin: full list, all users, paginated\n"
+        "!lbdaily               Admin shortcut → !lbfull daily\n"
+        "!lbweekly              Admin shortcut → !lbfull weekly\n"
+        "!lbmonthly             Admin shortcut → !lbfull monthly\n"
+        "```"
+    ), inline=False)
+    lb.add_field(name="🔄  Reset schedule", value=(
+        "```\n"
+        "Daily    midnight IST (auto)\n"
+        "Weekly   active week's end-date  (manual: !resetweek)\n"
+        "Monthly  active month's end-date (manual: !resetmonth)\n"
+        "```"
+    ), inline=False)
+
+    # ── Admin Config ──────────────────────────────────────────────────────────
+    admin_cfg = discord.Embed(title="⚙️  Admin — Configuration", color=0xEB459E)
+    admin_cfg.add_field(name="📆  Periods", value=(
+        "```\n"
+        '!setweek  "Label" YYYY-MM-DD YYYY-MM-DD   Create/activate week\n'
+        '!setmonth "Label" YYYY-MM-DD YYYY-MM-DD   Create/activate month\n'
+        "!currentweek                               Show active week & month\n"
+        "```"
+    ), inline=False)
+    admin_cfg.add_field(name="💯  Points config", value=(
+        "```\n"
+        "!setpoints <difficulty> <pts>   Set points per difficulty tier\n"
+        "!points                         View full difficulty → points table\n"
+        "```"
+    ), inline=False)
+
+    # ── Admin Manual Points ───────────────────────────────────────────────────
+    admin_pts = discord.Embed(title="🎛️  Admin — Manual Points", color=0xED4245)
+    admin_pts.add_field(name="\u200b", value=(
+        "```\n"
+        "!addpoints    @user <n> [reason]   Grant bonus points\n"
+        "!subpoints    @user <n> [reason]   Deduct points\n"
+        "!setmemberpoints @user <n> [reason]  Force-set adjustment total\n"
+        "!pointlog     [@user]              Audit recent adjustments\n"
+        "```"
+    ), inline=False)
+
+    # ── Admin Reset ───────────────────────────────────────────────────────────
+    admin_rst = discord.Embed(title="🔄  Admin — Reset", color=0x99AAB5)
+    admin_rst.add_field(name="🎯  Scoped resets", value=(
+        "```\n"
+        "!resetdaily     Today's daily board only\n"
+        "!resetweek      Weekly board (daily is subset)\n"
+        "!resetmonth     Monthly board (weekly/daily untouched)\n"
+        "!resetalltime   ☢️  Wipe ALL data — irreversible\n"
+        "```"
+    ), inline=False)
+    admin_rst.add_field(name="🔬  Targeted resets", value=(
+        "```\n"
+        "!resetuser @user [week|all]   Reset one member\n"
+        "!resetproblem <db_id>         Un-mark all solves for a problem\n"
+        "!resetweekfull                Delete solves + problems + deactivate week\n"
+        "!saferemove <db_id>           Remove problem (safe — warns if solved)\n"
+        "```"
+    ), inline=False)
+    admin_rst.add_field(name="⚠️  Isolation guarantee", value=(
+        "> `!resetdaily`  only deletes **daily-only** problems (no `week_id`).\n"
+        "> Weekly and monthly data is **never** touched by a daily reset."
+    ), inline=False)
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    footer = discord.Embed(
+        description=(
+            "```\n"
+            "⏱  Points valid only on the problem's assigned day  (00:00 – 23:59 IST)\n"
+            "🔁  Daily board resets automatically at midnight IST\n"
+            "🤖  Auto-checkall runs at 23:45 IST — use !check for instant results\n"
+            "```"
         ),
-        inline=False,
+        color=0x2B2D31,
     )
-    embed.add_field(
-        name="📅  Problems",
-        value=(
-            "`!problems` — This week's schedule (grouped by day)\n"
-            "`!addproblem <plat> <id> <diff> <date> [pts]` — Add problem *(admin)*\n"
-            "`!removeproblem <id> [keep_history]` — Remove problem *(admin)*\n"
-            "`!setdifficulty <id> <diff>` — Change difficulty *(admin)*"
-        ),
-        inline=False,
+    footer.set_footer(
+        text=f"CP Practice Bot  •  {config.PREFIX}help  •  Made with ❤️",
+        icon_url=bot.user.display_avatar.url,
     )
-    embed.add_field(
-        name="🔍  Solve Checking",
-        value=(
-            "`!check [@user]` — Check today's problems\n"
-            "`!checkall` — Bulk-check all members *(admin)*\n"
-            "`!submissions <plat> [count] [@user]` — Recent submissions"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🏆  Leaderboards",
-        value=(
-            "`!leaderboard` — Daily + Weekly + Monthly in one shot\n"
-            "*Daily resets midnight IST · Weekly resets on week end-date · Monthly on month end-date*"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="⚙️  Admin — Config",
-        value=(
-            "`!setweek \"Label\" YYYY-MM-DD YYYY-MM-DD` — Create/activate a week\n"
-            "`!setmonth \"Label\" YYYY-MM-DD YYYY-MM-DD` — Create/activate a month\n"
-            "`!currentweek` — Show active week & month\n"
-            "`!setpoints <difficulty> <pts>` — Configure points per difficulty\n"
-            "`!points` — Show difficulty → points table"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🎛️  Admin — Manual Points",
-        value=(
-            "`!addpoints @user <n> [reason]` — Add bonus points\n"
-            "`!subpoints @user <n> [reason]` — Deduct points\n"
-            "`!setmemberpoints @user <n> [reason]` — Force adjustment total\n"
-            "`!pointlog [@user]` — View recent adjustments"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🔄  Admin — Reset",
-        value=(
-            "`!resetdaily` — Clear today's daily leaderboard only\n"
-            "`!resetweek` — Clear weekly (daily is a subset, also cleared)\n"
-            "`!resetmonth` — Clear monthly (daily + weekly also cleared)\n"
-            "`!resetalltime` — ☢️ Wipe everything\n"
-            "`!resetuser @user [week|all]` — Reset one member\n"
-            "`!resetproblem <db_id>` — Un-mark a problem's solves\n"
-            "`!resetweekfull` — Delete solves + problems + deactivate week"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🌐  Platforms",
-        value="`cf` Codeforces · `lc` LeetCode · `cc` CodeChef · `atcoder` AtCoder",
-        inline=False,
-    )
-    embed.set_footer(text="Points locked to assigned day only — 00:00–23:59 IST. Daily board auto-resets at midnight IST.")
-    await ctx.send(embed=embed)
+
+    await ctx.send(embeds=[header, reg, problems, checking, lb, admin_cfg, admin_pts, admin_rst, footer])
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────

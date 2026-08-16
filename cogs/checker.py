@@ -1,65 +1,87 @@
 """
-cogs/checker.py  — v3
-!check / !checkall
-Key fix: solve timestamp is checked against BOTH the day start AND day end (midnight IST).
-If someone runs !check after midnight for yesterday's problem → no points, day is locked.
+cogs/checker.py  — v4
+!check / !checkall  +  auto-checkall at 23:58 IST
 
-Background tasks:
-  auto_check      — runs every 6 h, awards points for today's open window
-  midnight_reset  — fires at 00:00 IST every night:
-                    1. Resets the daily leaderboard (solo, weekly/monthly untouched)
-                    2. Logs the reset silently (no message sent)
+Rate-limit strategy
+───────────────────
+  !check (per user):
+    • Max 3 runs / day per user, 1 h cooldown between runs.
+    • CF uses a single bulk fetch then local filters — never more than
+      1 CF API call per !check, regardless of how many CF problems exist.
+    • Other platforms: 1 s gap between consecutive hits.
+
+  !checkall / auto-check (bulk):
+    • Members are processed SEQUENTIALLY, never concurrently.
+    • Gap between members: BULK_MEMBER_DELAY (2 s) — gives CF / LC / CC
+      time to cool down between consecutive user lookups.
+    • CF: still 1 bulk fetch per member → local filter.  Zero extra calls.
+    • Other platforms: BULK_PROBLEM_DELAY (1.5 s) between per-problem hits.
+
+  Auto-checkall at 23:58 IST:
+    • Fires 2 min before midnight so points land before the day closes.
+    • Uses the same bulk logic with generous delays — no rush.
+    • Posts a summary embed to CHECKALL_CHANNEL_ID if set in config,
+      otherwise logs to console only.
+
+Background tasks
+────────────────
+  auto_check_6h      — every 6 h, awards points silently (unchanged)
+  _night_check_loop  — fires at 23:58 IST, bulk-checks all members
+  _midnight_reset_loop — fires at 00:00 IST, resets daily leaderboard
 """
 
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime, timezone, timedelta, time
+from datetime import datetime, timezone, timedelta
 import asyncio
 from database.connection import get_pool
 from database import queries as q
 import platforms as P
 from config import COLOR_SUCCESS, COLOR_INFO, COLOR_WARN, ADMIN_ROLE
 
+# Optional: set to a channel ID in config.py to receive nightly summary
+# e.g.  CHECKALL_CHANNEL_ID = 123456789
+try:
+    from config import CHECKALL_CHANNEL_ID
+except ImportError:
+    CHECKALL_CHANNEL_ID = None
+
 IST = q.IST
 
-# ── Per-user !check rate limiting (in-memory, resets on bot restart) ──────────
-# Why: hitting CF/AtCoder/LC/CC endpoints too often gets the bot IP rate-limited.
-# Rule: max 3 !check runs per user per day, and a 1h cooldown after EVERY run
-# (so even within the 3/day budget, runs are spaced out).
-MAX_CHECKS_PER_DAY = 3
-COOLDOWN_SECONDS   = 60 * 60          # 1 hour
-API_HIT_DELAY      = 0.5              # seconds between platform API hits
+# ── Rate-limit constants ───────────────────────────────────────────────────────
+MAX_CHECKS_PER_DAY  = 3
+COOLDOWN_SECONDS    = 60 * 60   # 1 h between !check runs
+API_HIT_DELAY       = 1.0       # seconds between per-problem API hits (!check)
+BULK_MEMBER_DELAY   = 2.0       # seconds between members in bulk ops
+BULK_PROBLEM_DELAY  = 1.5       # seconds between per-problem hits inside bulk
 
 
 def _day_window(target_date) -> tuple[datetime, datetime]:
     return q._day_window_utc(target_date)
 
 
-def _seconds_until_midnight_ist() -> float:
-    """Seconds from now until the next 00:00:00 IST."""
-    now_ist      = datetime.now(IST)
-    tomorrow_ist = (now_ist + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    return (tomorrow_ist - now_ist).total_seconds()
+def _seconds_until_ist(hour: int, minute: int) -> float:
+    """Seconds from now until the next HH:MM IST (today or tomorrow)."""
+    now_ist    = datetime.now(IST)
+    target_ist = now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target_ist <= now_ist:
+        target_ist += timedelta(days=1)
+    return (target_ist - now_ist).total_seconds()
 
 
 class Checker(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.auto_check.start()
-        # midnight reset is started after bot is ready (see below)
-        self._midnight_task = None
+        self.auto_check_6h.start()
+        self._midnight_task   = None
+        self._night_check_task = None
         # { user_id: {"date": date, "count": int, "cooldown_until": datetime|None} }
         self._check_state: dict[int, dict] = {}
 
+    # ── Rate-limit helpers ────────────────────────────────────────────────────
+
     def _check_rate_limit(self, user_id: int) -> tuple[bool, str]:
-        """
-        Returns (allowed, reason_if_blocked).
-        Max MAX_CHECKS_PER_DAY runs/day per user + COOLDOWN_SECONDS after each run.
-        Resets automatically at IST day-rollover (compares stored date vs today_ist()).
-        """
         now   = datetime.now(timezone.utc)
         today = q.today_ist()
         state = self._check_state.get(user_id)
@@ -73,13 +95,13 @@ class Checker(commands.Cog):
             mins = int(remaining.total_seconds() // 60) + 1
             return False, (
                 f"⏳  Please wait **{mins} min** before running `!check` again "
-                f"(1h cooldown between checks — keeps us from getting rate-limited)."
+                f"(1 h cooldown — keeps us from getting rate-limited)."
             )
 
         if state["count"] >= MAX_CHECKS_PER_DAY:
             return False, (
-                f"🚫  You've used all **{MAX_CHECKS_PER_DAY} `!check` runs** for today. "
-                f"Resets at midnight IST."
+                f"🚫  You've used all **{MAX_CHECKS_PER_DAY}** `!check` runs for today. "
+                "Resets at midnight IST."
             )
 
         return True, ""
@@ -96,16 +118,18 @@ class Checker(commands.Cog):
         state["cooldown_until"] = now + timedelta(seconds=COOLDOWN_SECONDS)
 
     def cog_unload(self):
-        self.auto_check.cancel()
+        self.auto_check_6h.cancel()
         if self._midnight_task:
             self._midnight_task.cancel()
+        if self._night_check_task:
+            self._night_check_task.cancel()
 
-    # ── !check ───────────────────────────────────────────────────────────────
+    # ── !check ────────────────────────────────────────────────────────────────
 
     @commands.command(name="check")
     async def check(self, ctx, member: discord.Member = None):
         """
-        Check solve status for TODAY's problems.
+        Check your (or another member's) solve status for today's problems.
         Points are only awarded within today's IST window (00:00 – 23:59 IST).
         !check
         !check @friend
@@ -114,7 +138,6 @@ class Checker(commands.Cog):
         pool   = get_pool()
         today  = q.today_ist()
 
-        # ── Rate limit: protects platform endpoints (CF/AtCoder/LC/CC) from bans ──
         allowed, reason = self._check_rate_limit(ctx.author.id)
         if not allowed:
             await ctx.send(reason)
@@ -133,7 +156,7 @@ class Checker(commands.Cog):
             if all_probs:
                 await ctx.send(
                     f"📭  No problems assigned for today (`{today}`).\n"
-                    f"Use `!problems` to see the full week schedule."
+                    "Use `!problems` to see the full week schedule."
                 )
             else:
                 await ctx.send("📭  No problems assigned this week yet.")
@@ -141,18 +164,17 @@ class Checker(commands.Cog):
 
         msg = await ctx.send(f"🔍  Checking **{target.display_name}**'s submissions for today…")
         self._record_check_use(ctx.author.id)
+
         try:
-            results, total_earned = await self._check_member(target, probs, str(ctx.guild.id))
+            results, total_earned = await self._check_member(
+                target, probs, str(ctx.guild.id), delay=API_HIT_DELAY
+            )
         except Exception as e:
             print(f"[check] _check_member crashed for {target.id}: {e}")
             await msg.edit(content=f"⚠️  An error occurred while checking: `{e}`")
             return
 
-        # Ensure no None slots leak into the embed (safety net)
-        results = [
-            r if r is not None else "⚠️  Unknown error for this problem."
-            for r in results
-        ]
+        results = [r if r is not None else "⚠️  Unknown error." for r in results]
 
         color = COLOR_SUCCESS if total_earned > 0 else COLOR_INFO
         embed = discord.Embed(
@@ -161,17 +183,17 @@ class Checker(commands.Cog):
             color=color,
         )
         embed.set_thumbnail(url=target.display_avatar.url)
-        embed.add_field(name="📅  Date",          value=f"`{today}`",                                   inline=True)
+        embed.add_field(name="📅  Date",          value=f"`{today}`",                                    inline=True)
         embed.add_field(name="🏅  Points Earned", value=f"**+{total_earned} pts**" if total_earned > 0
-                                                         else "No new points",                           inline=True)
+                                                         else "No new points",                            inline=True)
         remaining = MAX_CHECKS_PER_DAY - self._check_state[ctx.author.id]["count"]
         embed.set_footer(
-            text=f"Week: {week['label']}  ·  Points valid 00:00–23:59 IST today only  ·  "
+            text=f"Week: {week['label']}  ·  Points valid 00:00–23:59 IST only  ·  "
                  f"{remaining}/{MAX_CHECKS_PER_DAY} checks left today"
         )
         await msg.edit(content=None, embed=embed)
 
-    # ── !checkall ────────────────────────────────────────────────────────────
+    # ── !checkall ─────────────────────────────────────────────────────────────
 
     @commands.command(name="checkall")
     @commands.has_permissions(administrator=True)
@@ -186,7 +208,7 @@ class Checker(commands.Cog):
                 await ctx.send("❌  No active week.")
                 return
             probs = await q.get_problems_for_day(conn, str(ctx.guild.id), today)
-            users = await conn.fetch("SELECT DISTINCT discord_id FROM handles")
+            users = await conn.fetch("SELECT DISTINCT discord_id FROM handles WHERE guild_id = $1", str(ctx.guild.id))
 
         if not probs:
             await ctx.send(f"📭  No problems for today (`{today}`).")
@@ -194,27 +216,12 @@ class Checker(commands.Cog):
 
         msg = await ctx.send(
             f"⏳  Checking **{len(users)}** member(s) across "
-            f"**{len(probs)}** problem(s) for `{today}`…"
+            f"**{len(probs)}** problem(s) for `{today}`…  *(~{len(users) * 2}s)*"
         )
-        summary, total_new = [], 0
 
-        for row in users:
-            member = ctx.guild.get_member(int(row["discord_id"]))
-            if not member:
-                continue
-            try:
-                results, earned = await self._check_member(member, probs, str(ctx.guild.id))
-            except Exception as e:
-                print(f"[checkall] _check_member crashed for {member.id}: {e}")
-                summary.append(f"**{member.display_name}**  ⚠️ error")
-                await asyncio.sleep(API_HIT_DELAY)
-                continue
-            total_new += earned
-            results = [r if r is not None else "⚠️ error" for r in results]
-            solved_count = sum(1 for r in results if "Solved" in r or "Already" in r)
-            badge = f"**+{earned} pts**" if earned else "—"
-            summary.append(f"**{member.display_name}**  {badge}  `{solved_count}/{len(probs)}`")
-            await asyncio.sleep(API_HIT_DELAY)
+        summary, total_new = await self._bulk_check_guild(
+            ctx.guild, probs, str(ctx.guild.id)
+        )
 
         embed = discord.Embed(
             title=f"📊  Bulk Check  —  {today}",
@@ -224,37 +231,34 @@ class Checker(commands.Cog):
         embed.set_footer(text=f"Total new points: {total_new}  ·  Week: {week['label']}")
         await msg.edit(content=None, embed=embed)
 
-    # ── Core logic ────────────────────────────────────────────────────────────
+    @check_all.error
+    async def check_all_error(self, ctx, error):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.send(f"❌  You need the **{ADMIN_ROLE}** role or Administrator permission.")
+
+    # ── Core: check one member ────────────────────────────────────────────────
 
     async def _check_member(
-        self, member: discord.Member, probs: list, guild_id: str
+        self,
+        member: discord.Member,
+        probs: list,
+        guild_id: str,
+        delay: float = API_HIT_DELAY,
     ) -> tuple[list[str], int]:
         """
-        Award points ONLY if:
-          1. The problem's assigned_date == today (IST)
-          2. The solve timestamp falls within [day_start_utc, day_end_utc]
-             i.e. midnight-to-midnight IST of that day.
-        This means after 00:00 IST the previous day's problems are CLOSED.
+        Check and award points for a single member.
 
-        Speed/rate-limit strategy:
-          - Non-network checks (day-locked, already-recorded, no adapter, no handle)
-            are resolved instantly, in order, no delay.
-          - Problems that actually need a platform API hit are grouped BY PLATFORM.
-            Different platforms (CF/LC/CC/AtCoder) are hit CONCURRENTLY since they're
-            independent services with separate rate limits.
-          - Within the SAME platform, calls stay sequential with a 0.5s gap
-            (API_HIT_DELAY) between them — this is the only place delay matters,
-            since hitting one platform repeatedly back-to-back is what trips its
-            rate limiter.
+        CF optimisation: one bulk fetch → local filter (0 extra API calls).
+        Other platforms:  sequential with `delay` seconds between hits.
         """
-        results      = [None] * len(probs)   # filled in original order
+        results      = [None] * len(probs)
         total_earned = 0
         pool         = get_pool()
         now_utc      = datetime.now(timezone.utc)
 
-        # platform -> list of (index, prob) that need a real API hit
         api_groups: dict[str, list[tuple[int, dict]]] = {}
 
+        # ── Fast local pre-checks (no network) ───────────────────────────────
         for idx, prob in enumerate(probs):
             prob_id       = prob["id"]
             pid           = prob["problem_id"]
@@ -263,10 +267,8 @@ class Checker(commands.Cog):
             assigned_date = prob["assigned_date"]
             adapter       = P.get(platform)
 
-            # Hard day window — both sides enforced
             day_start_utc, day_end_utc = _day_window(assigned_date)
 
-            # ── Guard: if current time is past the day end, lock it out ─────
             if now_utc > day_end_utc:
                 results[idx] = (
                     f"🔒  `{platform.upper()} {pid}` — "
@@ -300,9 +302,32 @@ class Checker(commands.Cog):
         if not api_groups:
             return results, total_earned
 
+        # ── Platform groups: different platforms run concurrently, ────────────
+        # within each platform calls are sequential with `delay` gaps.
         async def _run_platform_group(platform: str, items: list[tuple[int, dict]]):
             adapter = P.get(platform)
             earned  = 0
+
+            async with pool.acquire() as conn:
+                handle = await q.get_handle(conn, str(member.id), platform)
+
+            if not handle:
+                for idx, prob in items:
+                    results[idx] = (
+                        f"⚠️  `{platform.upper()} {prob['problem_id']}` — "
+                        f"No {adapter.NAME} handle."
+                    )
+                return 0
+
+            # CF: single bulk fetch, then local filter — zero extra API calls
+            bulk_submissions = None
+            if platform == "cf" and hasattr(adapter, "fetch_all_submissions"):
+                try:
+                    bulk_submissions = await adapter.fetch_all_submissions(handle)
+                except Exception as e:
+                    print(f"[checker] CF bulk fetch failed for {handle}: {e}")
+                    # Graceful degradation: fall through to per-problem calls
+
             for i, (idx, prob) in enumerate(items):
                 pid           = prob["problem_id"]
                 pts           = prob["points"]
@@ -310,24 +335,19 @@ class Checker(commands.Cog):
                 assigned_date = prob["assigned_date"]
                 day_start_utc, day_end_utc = _day_window(assigned_date)
 
-                if i > 0:
-                    # Only delay between repeated hits to the SAME platform.
-                    await asyncio.sleep(API_HIT_DELAY)
-
                 try:
-                    async with pool.acquire() as conn:
-                        handle = await q.get_handle(conn, str(member.id), platform)
-
-                    if not handle:
-                        results[idx] = (
-                            f"⚠️  `{platform.upper()} {pid}` — "
-                            f"No {adapter.NAME} handle. `!register {platform} <handle>`"
+                    if bulk_submissions is not None:
+                        solved, status = adapter.check_solved_from_submissions(
+                            bulk_submissions, pid,
+                            day_start_utc.timestamp(), day_end_utc.timestamp(),
                         )
-                        continue
-
-                    solved, status = await adapter.check_solved(
-                        handle, pid, day_start_utc.timestamp(), day_end_utc.timestamp()
-                    )
+                    else:
+                        if i > 0:
+                            await asyncio.sleep(delay)
+                        solved, status = await adapter.check_solved(
+                            handle, pid,
+                            day_start_utc.timestamp(), day_end_utc.timestamp(),
+                        )
 
                     if solved:
                         async with pool.acquire() as conn:
@@ -348,23 +368,73 @@ class Checker(commands.Cog):
                         results[idx] = f"❌  `{platform.upper()} {pid}` — {status.replace('❌ ', '')}"
 
                 except Exception as e:
-                    print(f"[checker] Platform {platform} prob {pid} error: {e}")
+                    print(f"[checker] {platform} / {pid} error for {handle}: {e}")
                     results[idx] = f"⚠️  `{platform.upper()} {pid}` — API error: `{e}`"
 
             return earned
 
         earned_per_group = await asyncio.gather(
-            *[_run_platform_group(platform, items) for platform, items in api_groups.items()]
+            *[_run_platform_group(plt, items) for plt, items in api_groups.items()]
         )
         total_earned += sum(earned_per_group)
-
         return results, total_earned
 
-    # ── Background: auto-check every 6 h ─────────────────────────────────────
+    # ── Core: bulk-check all members in a guild ───────────────────────────────
+
+    async def _bulk_check_guild(
+        self,
+        guild: discord.Guild,
+        probs: list,
+        guild_id: str,
+    ) -> tuple[list[str], int]:
+        """
+        Sequentially check every registered member with BULK_MEMBER_DELAY between
+        each one.  Returns (summary_lines, total_new_points).
+
+        Why sequential + delay (not concurrent)?
+        Hitting CF with 20 simultaneous user.status calls triggers 503s.
+        Sequential + 2 s gap keeps us well under every platform's rate limit.
+        """
+        pool    = get_pool()
+        summary = []
+        total   = 0
+
+        async with pool.acquire() as conn:
+            users = await conn.fetch(
+                "SELECT DISTINCT discord_id FROM handles WHERE guild_id = $1", guild_id
+            )
+
+        for i, row in enumerate(users):
+            member = guild.get_member(int(row["discord_id"]))
+            if not member:
+                continue
+
+            if i > 0:
+                # Breathing room between members — the main rate-limit defence
+                await asyncio.sleep(BULK_MEMBER_DELAY)
+
+            try:
+                results, earned = await self._check_member(
+                    member, probs, guild_id, delay=BULK_PROBLEM_DELAY
+                )
+            except Exception as e:
+                print(f"[bulk_check] _check_member error for {member.id}: {e}")
+                summary.append(f"**{member.display_name}**  ⚠️ error: `{e}`")
+                continue
+
+            total += earned
+            results      = [r if r is not None else "⚠️ error" for r in results]
+            solved_count = sum(1 for r in results if "Solved" in r or "Already" in r)
+            badge        = f"**+{earned} pts**" if earned else "—"
+            summary.append(f"**{member.display_name}**  {badge}  `{solved_count}/{len(probs)}`")
+
+        return summary, total
+
+    # ── Background: auto-check every 6 h (silent) ────────────────────────────
 
     @tasks.loop(hours=6)
-    async def auto_check(self):
-        """Silently check all members every 6 h within the active day window."""
+    async def auto_check_6h(self):
+        """Silently award points for today's problems every 6 h."""
         today = q.today_ist()
         for guild in self.bot.guilds:
             pool = get_pool()
@@ -374,61 +444,95 @@ class Checker(commands.Cog):
                     if not week:
                         continue
                     probs = await q.get_problems_for_day(conn, str(guild.id), today)
-                    users = await conn.fetch("SELECT DISTINCT discord_id FROM handles")
-                for row in users:
-                    member = guild.get_member(int(row["discord_id"]))
-                    if member:
-                        await self._check_member(member, probs, str(guild.id))
-            except Exception:
-                pass
+                if probs:
+                    await self._bulk_check_guild(guild, probs, str(guild.id))
+            except Exception as e:
+                print(f"[auto_check_6h] Guild {guild.id}: {e}")
 
-    @auto_check.before_loop
+    @auto_check_6h.before_loop
     async def before_auto_check(self):
         await self.bot.wait_until_ready()
 
-    # ── Background: midnight IST auto daily-reset ─────────────────────────────
+    # ── Background: nightly check at 23:58 IST ───────────────────────────────
 
-    async def _midnight_reset_loop(self):
+    async def _night_check_loop(self):
         """
-        Waits until the next 00:00 IST, then:
-          1. Resets the daily leaderboard (only today's solves — weekly/monthly untouched).
-          2. Sleeps 24 h and repeats forever.
+        Fires at 23:58 IST every night — 2 min before the daily window closes.
+        Bulk-checks all members so last-minute solves get credited before
+        the day locks at midnight.
 
-        This is the automatic counterpart to !resetdaily.
-        After reset, !problems will automatically show the new day's problems
-        because it always reads today_ist().
+        Posts a summary embed to CHECKALL_CHANNEL_ID (if configured),
+        otherwise just logs to console.
         """
         await self.bot.wait_until_ready()
 
         while not self.bot.is_closed():
-            # Sleep until next midnight IST
-            wait = _seconds_until_midnight_ist()
-            print(f"[midnight_reset] Next daily reset in {wait/3600:.1f} h ({wait:.0f} s)")
+            wait = _seconds_until_ist(23, 58)
+            print(f"[night_check] Next nightly check in {wait/3600:.1f} h")
             await asyncio.sleep(wait)
 
-            # It is now 00:00 IST — yesterday's date
-            from datetime import date as _date
-            yesterday = (datetime.now(IST) - timedelta(seconds=1)).date()
+            today = q.today_ist()
+            print(f"[night_check] Running nightly bulk-check for {today}")
 
-            print(f"[midnight_reset] Auto-resetting daily leaderboard for {yesterday}")
             for guild in self.bot.guilds:
                 pool = get_pool()
                 try:
                     async with pool.acquire() as conn:
-                        deleted = await q.reset_daily_solves(conn, str(guild.id), yesterday)
-                    print(f"[midnight_reset] Guild {guild.id}: cleared {deleted} daily solves for {yesterday}")
-                except Exception as e:
-                    print(f"[midnight_reset] Guild {guild.id} error: {e}")
+                        week  = await q.get_active_week(conn, str(guild.id))
+                        if not week:
+                            continue
+                        probs = await q.get_problems_for_day(conn, str(guild.id), today)
 
-            # Sleep 23 h 59 min before checking again (avoid double-fire)
-            await asyncio.sleep(23 * 3600 + 59 * 60)
+                    if not probs:
+                        print(f"[night_check] Guild {guild.id}: no problems today, skipping.")
+                        continue
+
+                    summary, total_new = await self._bulk_check_guild(
+                        guild, probs, str(guild.id)
+                    )
+                    print(f"[night_check] Guild {guild.id}: {total_new} new pts awarded.")
+
+                    # Post summary to configured channel (optional)
+                    if CHECKALL_CHANNEL_ID:
+                        channel = guild.get_channel(CHECKALL_CHANNEL_ID)
+                        if channel:
+                            embed = discord.Embed(
+                                title=f"🌙  Nightly Auto-Check  —  {today}",
+                                description="\n".join(summary) or "No members found.",
+                                color=COLOR_INFO,
+                            )
+                            embed.set_footer(
+                                text=f"Auto-run at 23:58 IST  ·  New points this run: {total_new}  ·  Week: {week['label']}"
+                            )
+                            await channel.send(embed=embed)
+
+                except Exception as e:
+                    print(f"[night_check] Guild {guild.id} error: {e}")
+
+            # Sleep ~23 h 55 min before recalculating (avoids double-fire)
+            await asyncio.sleep(23 * 3600 + 55 * 60)
+
+    # ── Background: midnight IST daily-reset ─────────────────────────────────
+    # INTENTIONALLY DISABLED — no solves are deleted at midnight.
+    #
+    # Daily leaderboard already filters by assigned_date = today, so it
+    # naturally shows 0 entries the next day without touching the DB.
+    # Weekly solves must stay intact until the week ends (!resetweek).
+    # Monthly solves must stay intact until the month ends (!resetmonth).
+    # Deleting solves at midnight was the root cause of weekly/monthly
+    # leaderboards going blank. The _midnight_task field is kept so
+    # cog_unload does not crash.
+
+    # ── Start background loops on bot ready ──────────────────────────────────
 
     @commands.Cog.listener()
     async def on_ready(self):
-        """Start the midnight reset loop once on bot ready."""
-        if self._midnight_task is None or self._midnight_task.done():
-            self._midnight_task = asyncio.create_task(self._midnight_reset_loop())
-            print("✅  Midnight IST daily-reset task started.")
+        # _midnight_task intentionally not started — see note above
+        self._midnight_task = None
+
+        if self._night_check_task is None or self._night_check_task.done():
+            self._night_check_task = asyncio.create_task(self._night_check_loop())
+            print("✅  23:58 IST nightly auto-check task started.")
 
 
 async def setup(bot):

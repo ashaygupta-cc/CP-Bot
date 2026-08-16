@@ -96,3 +96,59 @@ class CodeforcesAdapter(PlatformAdapter):
                 return True, "✅ Accepted"
 
         return False, "❌ No accepted submission found within the time window."
+
+    async def fetch_all_submissions(self, handle: str, count: int = 500) -> list[dict]:
+        """
+        Fetch up to `count` recent submissions in ONE API call.
+        Called once per !check for all CF problems — avoids N separate user.status
+        hits that trigger Codeforces 503 Internal Server Errors.
+        Returns the raw list of submission dicts from CF API.
+        """
+        url = f"{CF_API}/user.status?handle={handle}&from=1&count={count}"
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    data = await r.json()
+        except Exception as e:
+            raise RuntimeError(f"CF API unreachable: {e}")
+
+        if data.get("status") != "OK":
+            comment = data.get("comment", "Unknown CF API error")
+            raise RuntimeError(f"CF API error: {comment}")
+
+        return data["result"]
+
+    def check_solved_from_submissions(
+        self,
+        submissions: list[dict],
+        problem_id: str,
+        since_ts: float,
+        until_ts: float | None = None,
+    ) -> tuple[bool, str]:
+        """
+        Pure local filter — zero network calls.
+        Used by checker.py after a single fetch_all_submissions() call.
+        """
+        contest = "".join(filter(str.isdigit, problem_id))
+        index   = "".join(filter(str.isalpha, problem_id)).upper()
+
+        if not contest or not index:
+            return False, f"❌ Invalid CF problem ID `{problem_id}`. Use format `1234A`."
+
+        for sub in submissions:
+            if sub.get("verdict") != "OK":
+                continue
+            prob     = sub.get("problem", {})
+            sub_cid  = str(prob.get("contestId", ""))
+            sub_idx  = prob.get("index", "").upper()
+            sub_time = float(sub.get("creationTimeSeconds", 0))
+
+            if (
+                sub_cid == contest
+                and sub_idx == index
+                and sub_time >= since_ts
+                and (until_ts is None or sub_time <= until_ts)
+            ):
+                return True, "✅ Accepted"
+
+        return False, "❌ No accepted submission found within the time window."

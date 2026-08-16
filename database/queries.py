@@ -199,11 +199,14 @@ async def get_problems_for_week(conn, guild_id: str, week_id: int) -> list:
 
 
 async def get_problems_for_day(conn, guild_id: str, target_date: date) -> list:
-    """Return problems whose assigned_date == target_date."""
+    """Return problems whose assigned_date == target_date.
+    Excludes soft-deleted problems (week_id = NULL via !removeproblem keep_history).
+    """
     return await conn.fetch(
         """
         SELECT * FROM problems
         WHERE guild_id = $1 AND assigned_date = $2
+          AND week_id IS NOT NULL
         ORDER BY platform, created_at
         """,
         guild_id, target_date,
@@ -250,6 +253,18 @@ async def has_solved(conn, discord_id: str, problem_db_id: int) -> bool:
         discord_id, problem_db_id,
     )
     return row is not None
+
+
+async def get_solve_count_for_problem(conn, problem_db_id: int, guild_id: str) -> int:
+    """
+    Returns how many distinct members have solved this problem in this guild.
+    Used by !saferemove to gate deletion.
+    """
+    row = await conn.fetchrow(
+        "SELECT COUNT(*) AS cnt FROM solves WHERE problem_db_id = $1 AND guild_id = $2",
+        problem_db_id, guild_id,
+    )
+    return row["cnt"] if row else 0
 
 
 async def record_solve(
@@ -316,45 +331,79 @@ async def get_daily_leaderboard(conn, guild_id: str, target_date: date) -> list:
 
 
 async def get_weekly_leaderboard(conn, guild_id: str, week_id: int) -> list:
-    """Points from all solves within the week's problems (no time restriction — week boundary)."""
+    """
+    Points from all solves within the week's problems PLUS manual point_adjustments.
+    Users with only adjustments (0 solves) are included via FULL OUTER JOIN so that
+    adjusted points always appear even when solve records were cleared.
+    """
     return await conn.fetch(
         """
-        SELECT s.discord_id,
-               SUM(s.points_awarded) AS total,
-               COUNT(*) AS solved_count
-        FROM solves s
-        JOIN problems p ON p.id = s.problem_db_id
-        WHERE s.guild_id = $1 AND p.week_id = $2
-        GROUP BY s.discord_id
+        SELECT
+            COALESCE(sv.discord_id, adj.discord_id) AS discord_id,
+            COALESCE(sv.solve_pts, 0) + COALESCE(adj.delta, 0) AS total,
+            COALESCE(sv.solved_count, 0) AS solved_count
+        FROM (
+            SELECT s.discord_id,
+                   SUM(s.points_awarded) AS solve_pts,
+                   COUNT(*) AS solved_count
+            FROM solves s
+            JOIN problems p ON p.id = s.problem_db_id
+            WHERE s.guild_id = $1 AND p.week_id = $2
+            GROUP BY s.discord_id
+        ) sv
+        FULL OUTER JOIN (
+            SELECT discord_id, SUM(delta) AS delta
+            FROM point_adjustments
+            WHERE guild_id = $1
+            GROUP BY discord_id
+        ) adj ON adj.discord_id = sv.discord_id
+        WHERE COALESCE(sv.solve_pts, 0) + COALESCE(adj.delta, 0) > 0
         ORDER BY total DESC
         """,
         guild_id, week_id,
     )
 
 
-async def get_monthly_leaderboard(conn, guild_id: str, month_start: date, month_end: date) -> list:
+async def get_monthly_leaderboard(
+    conn,
+    guild_id:        str,
+    month_start:     date,
+    month_end:       date,
+    exclude_week_id: int | None = None,   # kept for API compatibility, unused in display
+) -> list:
     """
-    Points from problems whose assigned_date falls within the month's date range.
+    Points from problems whose assigned_date falls within the month date range
+    PLUS manual point_adjustments for the guild.
 
-    NOTE: This intentionally does NOT filter on p.month_id. If a problem was
-    added with !addproblem before !setmonth was ever run (or before the
-    relevant month existed), month_id is stored as NULL on that row and it
-    would silently never show up on the monthly leaderboard even though
-    points were correctly awarded. Matching on the date range instead is
-    robust to that ordering issue and fixes already-affected rows without
-    any backfill/migration.
+    DISPLAY RULE: Shows ALL solves in the month window (including weekly problems).
+    Exclusion only applies to RESET operations, not reads.
+    Users with only adjustments (0 solves) are included via FULL OUTER JOIN so that
+    adjusted points always appear even when solve records were cleared.
     """
     return await conn.fetch(
         """
-        SELECT s.discord_id,
-               SUM(s.points_awarded) AS total,
-               COUNT(*) AS solved_count
-        FROM solves s
-        JOIN problems p ON p.id = s.problem_db_id
-        WHERE s.guild_id = $1
-          AND p.assigned_date >= $2
-          AND p.assigned_date <= $3
-        GROUP BY s.discord_id
+        SELECT
+            COALESCE(sv.discord_id, adj.discord_id) AS discord_id,
+            COALESCE(sv.solve_pts, 0) + COALESCE(adj.delta, 0) AS total,
+            COALESCE(sv.solved_count, 0) AS solved_count
+        FROM (
+            SELECT s.discord_id,
+                   SUM(s.points_awarded) AS solve_pts,
+                   COUNT(*) AS solved_count
+            FROM solves s
+            JOIN problems p ON p.id = s.problem_db_id
+            WHERE s.guild_id = $1
+              AND p.assigned_date >= $2
+              AND p.assigned_date <= $3
+            GROUP BY s.discord_id
+        ) sv
+        FULL OUTER JOIN (
+            SELECT discord_id, SUM(delta) AS delta
+            FROM point_adjustments
+            WHERE guild_id = $1
+            GROUP BY discord_id
+        ) adj ON adj.discord_id = sv.discord_id
+        WHERE COALESCE(sv.solve_pts, 0) + COALESCE(adj.delta, 0) > 0
         ORDER BY total DESC
         """,
         guild_id, month_start, month_end,
@@ -477,27 +526,86 @@ async def reset_current_week_solves(conn, guild_id: str) -> int:
 
 async def reset_current_month_solves(conn, guild_id: str) -> int:
     """
-    Deletes solves for problems assigned within the active month's date range.
-    Uses assigned_date BETWEEN month.start_date AND month.end_date rather than
-    p.month_id — same reasoning as get_monthly_leaderboard: problems added
-    before !setmonth was run can have a NULL month_id and would otherwise be
-    silently skipped.
+    DEPRECATED — use reset_month_solves_only() which accepts explicit date
+    bounds and an optional exclude_week_id for safe, isolated monthly resets.
+    Kept here so any external callers don't break immediately.
     """
-    result = await conn.execute(
-        """
-        DELETE FROM solves
-        WHERE guild_id = $1
-          AND problem_db_id IN (
-              SELECT p.id FROM problems p
-              JOIN months m ON m.guild_id = p.guild_id
-              WHERE p.guild_id = $1
-                AND m.is_active = TRUE
-                AND p.assigned_date >= m.start_date
-                AND p.assigned_date <= m.end_date
-          )
-        """,
+    month = await conn.fetchrow(
+        "SELECT start_date, end_date FROM months WHERE guild_id = $1 AND is_active = TRUE ORDER BY id DESC LIMIT 1",
         guild_id,
     )
+    if not month:
+        return 0
+    week = await conn.fetchrow(
+        "SELECT id FROM weeks WHERE guild_id = $1 AND is_active = TRUE ORDER BY id DESC LIMIT 1",
+        guild_id,
+    )
+    return await reset_month_solves_only(
+        conn,
+        guild_id,
+        month["start_date"],
+        month["end_date"],
+        protected_start=week["start_date"] if week else None,
+        protected_end=week["end_date"]   if week else None,
+    )
+
+
+async def reset_month_solves_only(
+    conn,
+    guild_id:        str,
+    month_start:     date,
+    month_end:       date,
+    protected_start: date | None = None,
+    protected_end:   date | None = None,
+) -> int:
+    """
+    Deletes ONLY the monthly-scope solves — weekly and daily leaderboards
+    are completely untouched.
+
+    Strategy (no data loss):
+      • Target  : problems with assigned_date IN [month_start, month_end]
+      • Exclude : problems with assigned_date IN [protected_start, protected_end]
+                  i.e. the active week's window — those solves are preserved
+                  so the weekly and daily leaderboards keep their data intact.
+      • Uses date ranges only (not month_id) for the same robustness reason
+        documented on get_monthly_leaderboard.
+
+    No handles, users, problems, weeks, or out-of-scope solves are touched.
+    """
+    if protected_start is not None and protected_end is not None:
+        result = await conn.execute(
+            """
+            DELETE FROM solves
+            WHERE guild_id = $1
+              AND problem_db_id IN (
+                  SELECT p.id FROM problems p
+                  WHERE p.guild_id = $1
+                    AND p.assigned_date >= $2
+                    AND p.assigned_date <= $3
+                    AND (
+                        p.week_id IS NULL
+                        OR p.assigned_date < $4
+                        OR p.assigned_date > $5
+                    )
+              )
+            """,
+            guild_id, month_start, month_end, protected_start, protected_end,
+        )
+    else:
+        # No active week — safe to clear all solves in the month date range
+        result = await conn.execute(
+            """
+            DELETE FROM solves
+            WHERE guild_id = $1
+              AND problem_db_id IN (
+                  SELECT p.id FROM problems p
+                  WHERE p.guild_id = $1
+                    AND p.assigned_date >= $2
+                    AND p.assigned_date <= $3
+              )
+            """,
+            guild_id, month_start, month_end,
+        )
     return int(result.split()[-1])
 
 

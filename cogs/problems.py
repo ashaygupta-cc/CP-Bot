@@ -6,6 +6,7 @@ cogs/problems.py  — v3
 !addproblem / !removeproblem / !setdifficulty unchanged.
 """
 
+import asyncio
 import discord
 from discord.ext import commands
 from datetime import date
@@ -354,8 +355,138 @@ class Problems(commands.Cog):
         embed.set_footer(text=f"By {ctx.author.display_name}")
         await ctx.send(embed=embed)
 
+    # ── !removeifunsolved (alias: !rius) ────────────────────────────────────
+
+    @commands.command(name="removeifunsolved", aliases=["rius"])
+    @is_admin()
+    async def remove_if_unsolved(self, ctx, problem_db_id: int = None):
+        """
+        Remove a problem ONLY if no one has solved it yet.
+        Safe alternative to !removeproblem for accidental additions.
+
+        0 solves  → hard deletes immediately, no confirmation needed.
+        N solves  → shows who solved it + asks for confirm to force-delete.
+
+        Alias: !rius
+        Usage: !rius 42
+        """
+        if problem_db_id is None:
+            await ctx.send(
+                "**Usage:** `!removeifunsolved <db_id>`  ·  Alias: `!rius <db_id>`\n"
+                "Find DB IDs with `!problems`"
+            )
+            return
+
+        pool     = get_pool()
+        guild_id = str(ctx.guild.id)
+
+        async with pool.acquire() as conn:
+            problem = await q.get_problem_by_id(conn, problem_db_id)
+
+        if not problem or str(problem["guild_id"]) != guild_id:
+            await ctx.send(
+                f"❌  Problem `#{problem_db_id}` not found in this server.\n"
+                "Use `!problems` to see today's problem IDs."
+            )
+            return
+
+        pemoji     = PLATFORM_EMOJIS.get(problem["platform"], "⚪")
+        prob_label = (
+            f"{pemoji}  `{problem['platform'].upper()} {problem['problem_id']}`"
+            + (f"  —  {problem['title']}" if problem.get("title") else "")
+        )
+
+        async with pool.acquire() as conn:
+            solve_count = await q.get_solve_count_for_problem(conn, problem_db_id, guild_id)
+
+        # ── Case 1: No solves — hard delete immediately ──────────────────
+        if solve_count == 0:
+            async with pool.acquire() as conn:
+                await q.hard_remove_problem(conn, problem_db_id, guild_id)
+
+            embed = discord.Embed(
+                title="🗑️  Problem Removed",
+                description=(
+                    f"{prob_label}\n\n"
+                    "✅  Deleted cleanly — **no solves were affected** "
+                    "(nobody had solved this problem yet)."
+                ),
+                color=COLOR_SUCCESS,
+            )
+            embed.set_footer(text=f"Removed by {ctx.author.display_name}")
+            await ctx.send(embed=embed)
+            return
+
+        # ── Case 2: Already solved — warn and ask to confirm ─────────────
+        async with pool.acquire() as conn:
+            solvers = await conn.fetch(
+                """
+                SELECT s.discord_id, s.points_awarded
+                FROM solves s
+                WHERE s.problem_db_id = $1 AND s.guild_id = $2
+                ORDER BY s.solved_at
+                """,
+                problem_db_id, guild_id,
+            )
+
+        solver_lines = []
+        for row in solvers:
+            member = ctx.guild.get_member(int(row["discord_id"]))
+            name   = member.display_name if member else f"*(Left — {row['discord_id']})*"
+            solver_lines.append(
+                f"• **{name}**  (−{row['points_awarded']} pts will be reversed)"
+            )
+
+        warn_embed = discord.Embed(
+            title="⚠️  Problem Already Solved — Force Remove?",
+            description=(
+                f"**Problem:** {prob_label}\n"
+                f"**Assigned date:** `{problem['assigned_date']}`\n\n"
+                f"**{solve_count} member(s) already solved this:**\n"
+                + "\n".join(solver_lines)
+                + "\n\nDeleting this problem will **remove their solve records and reverse all points**.\n\n"
+                "Type `confirm` within 30 s to proceed, or anything else to cancel."
+            ),
+            color=COLOR_WARN,
+        )
+        warn_embed.set_footer(text="This action cannot be undone.")
+        await ctx.send(embed=warn_embed)
+
+        def check(m):
+            return (
+                m.author    == ctx.author
+                and m.channel == ctx.channel
+                and m.content.lower() in ("confirm", "cancel", "no")
+            )
+
+        try:
+            reply = await self.bot.wait_for("message", check=check, timeout=30.0)
+        except asyncio.TimeoutError:
+            await ctx.send("🚫  Timed out — problem was **not** removed.")
+            return
+
+        if reply.content.lower() != "confirm":
+            await ctx.send("🚫  Cancelled — problem was **not** removed.")
+            return
+
+        async with pool.acquire() as conn:
+            await q.hard_remove_problem(conn, problem_db_id, guild_id)
+
+        embed = discord.Embed(
+            title="🗑️  Problem Force-Removed",
+            description=(
+                f"{prob_label}\n\n"
+                f"Deleted along with **{solve_count}** solve record(s).\n"
+                "Points awarded for this problem have been reversed."
+            ),
+            color=COLOR_SUCCESS,
+        )
+        embed.set_footer(text=f"Force-removed by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+
+
     @add_problem.error
-    @remove_problem.error
+    @remove_if_unsolved.error
     @set_difficulty.error
     async def admin_error(self, ctx, error):
         if isinstance(error, commands.CheckFailure):

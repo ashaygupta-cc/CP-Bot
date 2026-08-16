@@ -70,7 +70,7 @@ class AtCoderAdapter(PlatformAdapter):
             ))
         return results
 
-    async def check_solved(self, handle: str, problem_id: str, since_ts: float) -> tuple[bool, str]:
+    async def check_solved(self, handle: str, problem_id: str, since_ts: float, until_ts: float = None) -> tuple[bool, str]:
         url = (
             f"{KENKOOOO}/atcoder-api/v3/user/submissions"
             f"?user={handle}&from_second={int(since_ts)}"

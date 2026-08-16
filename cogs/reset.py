@@ -1,12 +1,12 @@
 """
 cogs/reset.py
 Admin-only reset commands.
-v2: Daily / Weekly / Monthly reset with correct scope isolation.
+v3: Monthly reset is now scope-isolated — it no longer clears weekly/daily.
 
 Rules:
   - !resetdaily    — only clears today's solve records (weekly/monthly untouched)
   - !resetweek     — clears weekly solves (also resets daily since daily is a subset)
-  - !resetmonth    — clears monthly solves (also resets daily + weekly subsets)
+  - !resetmonth    — clears ONLY monthly solves outside the active week; weekly/daily preserved
   - !resetalltime  — nuclear wipe of all solves
   - !resetuser     — reset specific user
   - !resetproblem  — un-mark solves for one problem (keep solve history option)
@@ -57,33 +57,22 @@ class Reset(commands.Cog):
     @is_admin()
     async def reset_daily(self, ctx):
         """
-        Reset today's leaderboard only.
-        Weekly and monthly leaderboards are NOT affected.
+        Explains that the daily leaderboard resets automatically — no data deleted.
         !resetdaily
         """
         today = q.today_ist()
         embed = discord.Embed(
-            title="⚠️  Reset Daily Leaderboard?",
+            title="ℹ️  Daily Leaderboard — Auto Reset",
             description=(
-                f"This clears solve records for problems assigned on **`{today}`**.\n\n"
-                "**Weekly and Monthly leaderboards are NOT affected.**\n\n"
-                "Type `yes` within 20 seconds to confirm."
+                f"The daily leaderboard **resets automatically every day** — no solves are deleted.\n\n"
+                f"It only shows problems assigned on **`{today}`**, so it appears empty "
+                f"at the start of each new day and fills up as members solve today's problems.\n\n"
+                "**Weekly and Monthly solves are never touched by a daily reset.**\n"
+                "Use `!resetweek` or `!resetmonth` to manually clear those scopes when the period ends."
             ),
-            color=COLOR_WARN,
+            color=COLOR_INFO,
         )
-        if not await _confirm(ctx, self.bot, embed):
-            return
-
-        pool = get_pool()
-        async with pool.acquire() as conn:
-            deleted = await q.reset_daily_solves(conn, str(ctx.guild.id), today)
-
-        embed = discord.Embed(
-            title="✅  Daily Leaderboard Reset",
-            description=f"Cleared **{deleted}** solve record(s) for `{today}`.",
-            color=COLOR_SUCCESS,
-        )
-        embed.set_footer(text=f"By {ctx.author.display_name}  ·  Weekly/Monthly untouched")
+        embed.set_footer(text="No data deleted — daily reset is automatic and non-destructive")
         await ctx.send(embed=embed)
 
     # ── !resetweek ──────────────────────────────────────────────────────────
@@ -92,9 +81,10 @@ class Reset(commands.Cog):
     @is_admin()
     async def reset_week(self, ctx):
         """
-        Reset the current week's leaderboard.
-        Also clears today's daily (daily is a subset of weekly).
-        Weekly leaderboard goes to zero. Monthly is NOT affected.
+        Reset the current week's leaderboard ONLY.
+        Deletes solves that carry the active week_id.
+        Daily is a subset of weekly so it resets too.
+        Monthly leaderboard is NOT affected — monthly solves have no week_id.
         !resetweek
         """
         pool = get_pool()
@@ -110,7 +100,7 @@ class Reset(commands.Cog):
             description=(
                 f"Clears **all solve records** for **{week['label']}** "
                 f"(`{week['start_date']}` → `{week['end_date']}`).\n\n"
-                "**Monthly leaderboard is NOT affected.**\n"
+                "**Monthly leaderboard is NOT affected** — monthly solves are stored separately.\n"
                 "Problems remain. Members can re-earn points via `!check`.\n\n"
                 "Type `yes` to confirm."
             ),
@@ -119,6 +109,8 @@ class Reset(commands.Cog):
         if not await _confirm(ctx, self.bot, embed):
             return
 
+        # reset_current_week_solves must delete WHERE week_id = active_week_id
+        # It must NOT touch rows that have week_id IS NULL (those are monthly-only solves).
         async with pool.acquire() as conn:
             deleted = await q.reset_current_week_solves(conn, str(ctx.guild.id))
 
@@ -139,40 +131,65 @@ class Reset(commands.Cog):
     @is_admin()
     async def reset_month(self, ctx):
         """
-        Reset the current month's leaderboard.
-        Also resets daily and weekly (they are subsets of monthly).
+        Reset the current month's leaderboard ONLY.
+        Solves within the active week's date range are preserved so that
+        the weekly and daily leaderboards remain completely untouched.
         !resetmonth
         """
         pool = get_pool()
         async with pool.acquire() as conn:
             month = await q.get_active_month(conn, str(ctx.guild.id))
+            week  = await q.get_active_week(conn, str(ctx.guild.id))
 
         if not month:
             await ctx.send("❌  No active month. Nothing to reset.")
             return
 
+        # Solves that fall inside the active week are left untouched so that
+        # the weekly and daily leaderboards remain intact.
+        protected_start = week["start_date"] if week else None
+        protected_end   = week["end_date"]   if week else None
+
+        week_note = (
+            f"Solves within the active week (**{week['label']}**: "
+            f"`{week['start_date']}` → `{week['end_date']}`) are **preserved**."
+            if week
+            else "⚠️  No active week — all monthly solves will be cleared."
+        )
+
         embed = discord.Embed(
             title="⚠️  Reset Monthly Leaderboard?",
             description=(
-                f"Clears **ALL solve records** for **{month['label']}** "
+                f"Clears monthly solve records for **{month['label']}** "
                 f"(`{month['start_date']}` → `{month['end_date']}`).\n\n"
-                "This also resets the daily and weekly leaderboards (subsets of monthly).\n\n"
+                f"{week_note}\n\n"
+                "**Weekly and Daily leaderboards are NOT affected.**\n\n"
                 "Type `yes` to confirm."
             ),
-            color=discord.Color.orange(),
+            color=COLOR_WARN,
         )
         if not await _confirm(ctx, self.bot, embed):
             return
 
         async with pool.acquire() as conn:
-            deleted = await q.reset_current_month_solves(conn, str(ctx.guild.id))
+            deleted = await q.reset_month_solves_only(
+                conn,
+                str(ctx.guild.id),
+                month["start_date"],
+                month["end_date"],
+                protected_start,
+                protected_end,
+            )
 
         embed = discord.Embed(
             title="✅  Monthly Leaderboard Reset",
-            description=f"Cleared **{deleted}** solve record(s) for **{month['label']}**.",
+            description=(
+                f"Cleared **{deleted}** solve record(s) for **{month['label']}**.\n"
+                "Weekly and daily leaderboards were not affected."
+            ),
             color=COLOR_SUCCESS,
         )
-        embed.set_footer(text=f"By {ctx.author.display_name}")
+        embed.set_footer(text=f"By {ctx.author.display_name}  ·  Weekly/Daily untouched")
         await ctx.send(embed=embed)
 
     # ── !resetalltime ────────────────────────────────────────────────────────
@@ -355,6 +372,136 @@ class Reset(commands.Cog):
         embed.set_footer(text=f"By {ctx.author.display_name}")
         await ctx.send(embed=embed)
 
+    # ── !saferemove ──────────────────────────────────────────────────────────
+
+    @commands.command(name="saferemove")
+    @is_admin()
+    async def safe_remove(self, ctx, problem_db_id: int = None):
+        """
+        Remove a mistakenly added problem — safe version.
+
+        • If 0 solves  → deletes immediately, no confirmation needed.
+        • If N solves  → shows who solved it, asks you to type 'confirm' to
+                         force-delete (removes the problem AND all its solves
+                         so points are reversed).
+
+        Usage:
+          !saferemove 42
+        """
+        if problem_db_id is None:
+            await ctx.send(
+                "**Usage:** `!saferemove <problem_db_id>`\n"
+                "Example: `!saferemove 42`  ·  Find IDs with `!problems`"
+            )
+            return
+
+        pool     = get_pool()
+        guild_id = str(ctx.guild.id)
+
+        async with pool.acquire() as conn:
+            problem = await q.get_problem_by_id(conn, problem_db_id)
+
+        # ── Does this problem exist in this guild? ──────────────────────────
+        if not problem or str(problem["guild_id"]) != guild_id:
+            await ctx.send(
+                f"❌  Problem `#{problem_db_id}` not found in this server.\n"
+                "Use `!problems` to see the current week's problem IDs."
+            )
+            return
+
+        prob_label = (
+            f"`{problem['platform'].upper()} {problem['problem_id']}`"
+            + (f"  —  {problem['title']}" if problem.get("title") else "")
+        )
+
+        async with pool.acquire() as conn:
+            solve_count = await q.get_solve_count_for_problem(conn, problem_db_id, guild_id)
+
+        # ── Case 1: No solves — delete straight away ────────────────────────
+        if solve_count == 0:
+            async with pool.acquire() as conn:
+                await q.hard_remove_problem(conn, problem_db_id, guild_id)
+
+            embed = discord.Embed(
+                title="🗑️  Problem Removed",
+                description=(
+                    f"{prob_label}\n\n"
+                    "✅  Deleted cleanly — **no solves were affected** "
+                    "(nobody had solved this problem yet)."
+                ),
+                color=COLOR_SUCCESS,
+            )
+            embed.set_footer(text=f"Removed by {ctx.author.display_name}")
+            await ctx.send(embed=embed)
+            return
+
+        # ── Case 2: Someone already solved it — warn and confirm ────────────
+        async with pool.acquire() as conn:
+            solvers = await conn.fetch(
+                """
+                SELECT s.discord_id, s.points_awarded
+                FROM solves s
+                WHERE s.problem_db_id = $1 AND s.guild_id = $2
+                ORDER BY s.solved_at
+                """,
+                problem_db_id, guild_id,
+            )
+
+        solver_lines = []
+        for row in solvers:
+            member = ctx.guild.get_member(int(row["discord_id"]))
+            name   = member.display_name if member else f"*(Left — {row['discord_id']})*"
+            solver_lines.append(f"• **{name}**  (−{row['points_awarded']} pts reversed)")
+
+        warn_embed = discord.Embed(
+            title="⚠️  Problem Already Solved — Force Remove?",
+            description=(
+                f"**Problem:** {prob_label}\n"
+                f"**Assigned date:** `{problem['assigned_date']}`\n\n"
+                f"**{solve_count} member(s) already solved this:**\n"
+                + "\n".join(solver_lines)
+                + "\n\n"
+                "Deleting this problem will **remove their solve records and reverse all points**.\n\n"
+                "Type `confirm` within 30 s to proceed, or anything else to cancel."
+            ),
+            color=COLOR_WARN,
+        )
+        warn_embed.set_footer(text="This action cannot be undone.")
+        await ctx.send(embed=warn_embed)
+
+        def check(m):
+            return (
+                m.author  == ctx.author
+                and m.channel == ctx.channel
+                and m.content.lower() in ("confirm", "cancel", "no")
+            )
+
+        try:
+            reply = await self.bot.wait_for("message", check=check, timeout=30.0)
+        except asyncio.TimeoutError:
+            await ctx.send("🚫  Timed out — problem was **not** removed.")
+            return
+
+        if reply.content.lower() != "confirm":
+            await ctx.send("🚫  Cancelled — problem was **not** removed.")
+            return
+
+        # ── Confirmed: hard delete (CASCADE removes solves too) ─────────────
+        async with pool.acquire() as conn:
+            await q.hard_remove_problem(conn, problem_db_id, guild_id)
+
+        embed = discord.Embed(
+            title="🗑️  Problem Force-Removed",
+            description=(
+                f"{prob_label}\n\n"
+                f"Deleted along with **{solve_count}** solve record(s).\n"
+                "Points awarded for this problem have been reversed."
+            ),
+            color=COLOR_SUCCESS,
+        )
+        embed.set_footer(text=f"Force-removed by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+
     @reset_daily.error
     @reset_week.error
     @reset_month.error
@@ -362,6 +509,7 @@ class Reset(commands.Cog):
     @reset_user.error
     @reset_problem.error
     @reset_week_full.error
+    @safe_remove.error
     async def reset_error(self, ctx, error):
         if isinstance(error, commands.CheckFailure):
             await ctx.send(f"❌  You need the **{ADMIN_ROLE}** role or Administrator permission.")
