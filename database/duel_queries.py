@@ -60,17 +60,59 @@ async def set_duel_config(conn, guild_id: str, key: str, value: str, updated_by:
     )
 
 
-async def ensure_user_exists(conn, discord_id: str):
+async def ensure_user_exists(conn, discord_id: str, discord_username: str = None):
     if not discord_id:
         return
+    did = str(discord_id).strip().lower()
+    uname = str(discord_username) if discord_username else did
     await conn.execute(
         """
-        INSERT INTO users (discord_id, created_at)
-        VALUES ($1, NOW())
-        ON CONFLICT (discord_id) DO NOTHING
+        INSERT INTO users (discord_id, discord_username, created_at)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT (discord_id) DO UPDATE
+            SET discord_username = COALESCE(users.discord_username, EXCLUDED.discord_username)
         """,
-        str(discord_id),
+        did, uname,
     )
+
+
+async def cleanup_duplicate_user_ratings(conn):
+    """Merges and cleans up case-mismatched duplicate rows in duel_ratings and users."""
+    try:
+        dups = await conn.fetch("""
+            SELECT LOWER(discord_id) as norm_id, guild_id, mode, COUNT(*)
+            FROM duel_ratings
+            GROUP BY LOWER(discord_id), guild_id, mode
+            HAVING COUNT(*) > 1
+        """)
+        for d in dups:
+            norm_id = d["norm_id"]
+            gid = d["guild_id"]
+            m = d["mode"]
+            rows = await conn.fetch(
+                "SELECT * FROM duel_ratings WHERE LOWER(discord_id)=$1 AND guild_id=$2 AND mode=$3 ORDER BY updated_at DESC",
+                norm_id, gid, m
+            )
+            if len(rows) > 1:
+                best = None
+                for r in rows:
+                    if r["wins"] > 0 or r["losses"] > 0 or r["draws"] > 0 or r["rating"] != 800:
+                        best = dict(r)
+                        break
+                if not best:
+                    best = dict(rows[0])
+                
+                await conn.execute(
+                    "DELETE FROM duel_ratings WHERE LOWER(discord_id)=$1 AND guild_id=$2 AND mode=$3",
+                    norm_id, gid, m
+                )
+                await conn.execute(
+                    """INSERT INTO duel_ratings (discord_id, guild_id, mode, rating, wins, losses, draws, streak, bot_matches, updated_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())""",
+                    norm_id, gid, m, best["rating"], best["wins"], best["losses"], best["draws"], best["streak"], best["bot_matches"]
+                )
+    except Exception as e:
+        print(f"[db/cleanup] Error cleaning duplicate ratings: {e}")
 
 
 # ── Ratings ──────────────────────────────────────────────────────────────
@@ -79,12 +121,12 @@ async def get_or_create_rating(conn, discord_id: str, guild_id: str, mode: str, 
     """Get or create a duel rating for a player. Default rating is 800 (Newbie)."""
     if not discord_id:
         return {"discord_id": "", "guild_id": guild_id, "mode": mode, "rating": default, "wins": 0, "losses": 0, "draws": 0}
-    discord_id = str(discord_id)
-    await ensure_user_exists(conn, discord_id)
+    did = str(discord_id).strip().lower()
+    await ensure_user_exists(conn, did)
 
     row = await conn.fetchrow(
-        "SELECT * FROM duel_ratings WHERE discord_id=$1 AND guild_id=$2 AND mode=$3",
-        discord_id, guild_id, mode,
+        "SELECT * FROM duel_ratings WHERE LOWER(discord_id)=$1 AND guild_id=$2 AND mode=$3",
+        did, guild_id, mode,
     )
     if row:
         return dict(row)
@@ -94,11 +136,11 @@ async def get_or_create_rating(conn, discord_id: str, guild_id: str, mode: str, 
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (discord_id, guild_id, mode) DO NOTHING
         """,
-        discord_id, guild_id, mode, default,
+        did, guild_id, mode, default,
     )
     row = await conn.fetchrow(
-        "SELECT * FROM duel_ratings WHERE discord_id=$1 AND guild_id=$2 AND mode=$3",
-        discord_id, guild_id, mode,
+        "SELECT * FROM duel_ratings WHERE LOWER(discord_id)=$1 AND guild_id=$2 AND mode=$3",
+        did, guild_id, mode,
     )
     return dict(row)
 
@@ -140,7 +182,7 @@ async def apply_rating_delta(
             streak = $2,
             bot_matches = bot_matches + {1 if is_bot_match else 0},
             updated_at = NOW()
-        WHERE discord_id=$3 AND guild_id=$4 AND mode=$5
+        WHERE LOWER(discord_id)=LOWER($3) AND guild_id=$4 AND mode=$5
         """,
         delta, streak, discord_id, guild_id, mode,
     )

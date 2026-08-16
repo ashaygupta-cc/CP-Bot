@@ -232,9 +232,61 @@ class Admin(commands.Cog):
         embed.set_footer(text="Change with /setpoints <difficulty> <points>")
         await ctx.send(embed=embed)
 
+    @commands.command(name="updatestats")
+    @is_admin()
+    async def update_stats(self, ctx, team: int = 11, contests: int = 2, linkedin: int = 450):
+        """
+        Update website live stats (Team count, Contests held, LinkedIn followers).
+        !updatestats 11 2 500
+        """
+        from api_server import _CUSTOM_STATS
+        _CUSTOM_STATS["team_members"] = team
+        _CUSTOM_STATS["contests_held"] = contests
+        _CUSTOM_STATS["linkedin_followers"] = linkedin
+
+        embed = discord.Embed(title="📊  Website Stats Updated", color=COLOR_SUCCESS)
+        embed.add_field(name="Team Members", value=str(team), inline=True)
+        embed.add_field(name="Contests Held", value=str(contests), inline=True)
+        embed.add_field(name="LinkedIn Followers", value=str(linkedin), inline=True)
+        embed.set_footer(text=f"Updated by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+
+    @commands.command(name="addcontest")
+    @is_admin()
+    async def add_contest(self, ctx, title: str = None, cf_url: str = None, start_time: str = None):
+        """
+        Register a new contest live on website portal with Codeforces link & countdown timer.
+        !addcontest "Binary Beats Contest 1" https://codeforces.com/contest/1234 "2026-08-20 18:00"
+        """
+        if not title or not cf_url:
+            embed = discord.Embed(title="🏆  Add Contest  —  Usage", color=COLOR_INFO)
+            embed.add_field(name="Command", value='`!addcontest "<title>" <cf_url> [start_time_iso]`', inline=False)
+            embed.add_field(name="Example", value='`!addcontest "Binary Beats Weekly 1" https://codeforces.com/contest/1234 "2026-08-20 18:00"`', inline=False)
+            await ctx.send(embed=embed)
+            return
+
+        from api_server import _REGISTERED_CONTESTS
+        contest_item = {
+          "id": f"contest-{len(_REGISTERED_CONTESTS) + 1}",
+          "title": title,
+          "url": cf_url,
+          "platform": "Codeforces",
+          "start_time": start_time or "2026-08-20T18:00:00Z",
+          "status": "UPCOMING",
+        }
+        _REGISTERED_CONTESTS.append(contest_item)
+
+        embed = discord.Embed(title="🚀  Contest Registered Live on Website", color=COLOR_SUCCESS)
+        embed.add_field(name="Title", value=title, inline=False)
+        embed.add_field(name="Portal Link", value=cf_url, inline=False)
+        embed.add_field(name="Starts At", value=start_time or "Upcoming", inline=False)
+        await ctx.send(embed=embed)
+
     @set_week.error
     @set_month.error
     @set_points.error
+    @update_stats.error
+    @add_contest.error
     async def admin_error(self, ctx, error):
         if isinstance(error, commands.CheckFailure):
             await ctx.send(f"❌  You need the **{ADMIN_ROLE}** role or Administrator permission.")

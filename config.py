@@ -50,7 +50,9 @@ VERIFICATION_ROLE_NAME = os.getenv("VERIFICATION_ROLE",      "Verification")
 MEMBER_ROLE_NAME       = os.getenv("MEMBER_ROLE",            "Member")
 
 # ── Inactivity system (cogs/inactivity.py) ────────────────────────────────────
-INACTIVITY_CHANNEL     = os.getenv("INACTIVITY_CHANNEL",    "general")
+INACTIVITY_CHANNEL     = os.getenv("INACTIVITY_CHANNEL",    "inactivity-info")
+_inactivity_ch_id      = os.getenv("INACTIVITY_CHANNEL_ID", "1538429554996154388")
+INACTIVITY_CHANNEL_ID  = int(_inactivity_ch_id) if _inactivity_ch_id.isdigit() else 1538429554996154388
 
 # ── Nightly auto-check summary channel (cogs/checker.py) ─────────────────────
 _checkall_ch = os.getenv("CHECKALL_CHANNEL_ID", "")

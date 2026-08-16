@@ -411,14 +411,17 @@ async def admin_help_cmd(ctx):
     ), inline=False)
 
     await ctx.send(embeds=[
-        header, verif, problems, checking, lb, inact, admin_cfg, admin_pts, admin_duel, admin_sync, admin_rst
+        header, verif, problems, checking, lb, inact
+    ])
+    await ctx.send(embeds=[
+        admin_cfg, admin_pts, admin_duel, admin_sync, admin_rst
     ])
 
 
 # ── !setcookie  (ADMIN-ONLY) ──────────────────────────────────────────────────
 
 @bot.command(name="setcookie")
-@commands.has_permissions(administrator=True)
+@commands.check(_is_admin)
 async def set_cookie(ctx, *, cookie_value: str = None):
     """
     Admin-only. Store the AtCoder REVEL_SESSION cookie so the bot can use a
@@ -435,6 +438,7 @@ async def set_cookie(ctx, *, cookie_value: str = None):
 
     pool = get_pool()
     async with pool.acquire() as conn:
+        await q.set_bot_config(conn, "atcoder_session", cookie_value)
         await q.set_bot_config(conn, "atcoder_cookie", cookie_value)
 
     try:

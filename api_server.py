@@ -17,7 +17,10 @@ Auth model:
 
 import os
 import json
+import asyncio
 import datetime as dt
+import discord
+import aiohttp
 from aiohttp import web
 
 from database.connection import get_pool, ping_db
@@ -28,7 +31,7 @@ GUILD_ID = os.getenv("GUILD_ID", "")
 BB_API_KEY = os.getenv("BB_API_KEY", "")
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv(
     "BB_ALLOWED_ORIGINS",
-    "http://localhost:5173,https://binarybeats.vercel.app",
+    "http://localhost:5173,https://binarybeats.in,https://www.binarybeats.in,https://binarybeats.vercel.app",
 ).split(",") if o.strip()]
 
 _bot_instance = None
@@ -86,7 +89,45 @@ def _require_key(request: web.Request) -> None:
                                    content_type="application/json")
 
 
-# ─────────────────────────────  routes  ─────────────────────────────
+_CUSTOM_STATS = {
+    "team_members": 11,
+    "contests_held": 2,
+    "linkedin_followers": 273,
+}
+
+_REGISTERED_CONTESTS = [
+    {
+        "id": "bb-contest-1",
+        "title": "Binary Beats Grand Contest 1",
+        "url": "https://codeforces.com/contests",
+        "platform": "Codeforces",
+        "start_time": "2026-08-20T18:00:00Z",
+        "status": "UPCOMING",
+    },
+    {
+        "id": "bb-contest-2",
+        "title": "Binary Beats ICPC Practice Gym",
+        "url": "https://codeforces.com/gyms",
+        "platform": "Codeforces",
+        "start_time": "2026-08-25T17:00:00Z",
+        "status": "UPCOMING",
+    }
+]
+
+
+async def stats(request: web.Request) -> web.Response:
+    """GET /api/stats — Returns live Discord member count, team count, contests held, and LinkedIn followers."""
+    discord_members = 250
+    if _bot_instance and _bot_instance.guilds:
+        discord_members = sum(g.member_count or 0 for g in _bot_instance.guilds)
+
+    return _json({
+        "discord_members": discord_members,
+        "team_members": _CUSTOM_STATS["team_members"],
+        "contests_held": _CUSTOM_STATS["contests_held"],
+        "linkedin_followers": _CUSTOM_STATS["linkedin_followers"],
+    })
+
 
 async def health(request: web.Request) -> web.Response:
     info = {"status": "ok"}
@@ -206,6 +247,7 @@ async def leaderboard_rating(request: web.Request) -> web.Response:
     gid = _guild(request)
 
     async with get_pool().acquire() as conn:
+        await duel_queries.cleanup_duplicate_user_ratings(conn)
         rows = await duel_queries.get_leaderboard(conn, gid, mode, limit)
         ids = [r["discord_id"] for r in rows]
         names = {}
@@ -384,7 +426,7 @@ async def create_duel_api(request: web.Request) -> web.Response:
 
             used = await duel_queries.get_active_duel_numbers(conn, gid)
             duel_num = duel_queries.next_free_number(used)
-            bot_rating = 800 if is_bot else None
+            bot_rating = p1_rating["rating"] if is_bot else None
 
             duel_id = await duel_queries.create_duel(
                 conn, gid, mode, p1_id, p2_id if not is_bot else None,
@@ -440,6 +482,12 @@ async def create_duel_api(request: web.Request) -> web.Response:
             "player1_id": p1_id,
             "player2_id": p2_id,
             "is_bot_match": is_bot,
+            "p1_rating": p1_rating["rating"],
+            "p2_rating": p2_rating["rating"],
+            "ratings": {
+                p1_id: p1_rating["rating"],
+                (p2_id or "bot"): p2_rating["rating"],
+            },
             "problems": problem_rows,
         })
     except Exception as e:
@@ -455,10 +503,22 @@ async def get_duel_state_api(request: web.Request) -> web.Response:
             duel = await duel_queries.get_duel(conn, duel_id)
             if not duel:
                 return _json({"error": "duel not found"}, status=404)
+            gid = _guild(request)
+            p1_id = duel["player1_id"]
+            p2_id = duel["player2_id"]
+            mode = duel["mode"]
+            p1_row = await duel_queries.get_or_create_rating(conn, p1_id, gid, mode)
+            p2_row = await duel_queries.get_or_create_rating(conn, p2_id, gid, mode) if p2_id else {"rating": duel.get("bot_rating") or p1_row["rating"]}
             cur_prob = await duel_queries.get_current_problem(conn, duel_id, duel["current_game"])
             probs = await conn.fetch("SELECT * FROM duel_problems WHERE duel_id = $1 ORDER BY game_number", duel_id)
         return _json({
             "duel": dict(duel),
+            "ratings": {
+                p1_id: p1_row["rating"],
+                (p2_id or "bot"): p2_row["rating"],
+            },
+            "p1_rating": p1_row["rating"],
+            "p2_rating": p2_row["rating"],
             "current_problem": dict(cur_prob) if cur_prob else None,
             "all_problems": _rows(probs),
         })
@@ -530,6 +590,26 @@ async def verify_duel_submission_api(request: web.Request) -> web.Response:
                     winner_id = updated_duel["player2_id"]
                 await duel_queries.finish_duel(conn, duel_id, winner_id)
 
+                # Calculate & apply Elo / rating deltas + W/L/D stats
+                mode = updated_duel["mode"]
+                p1_id = updated_duel["player1_id"]
+                p2_id = updated_duel["player2_id"]
+                is_bot = updated_duel.get("is_bot_match", False)
+
+                if winner_id == p1_id:
+                    r1, r2 = "win", "loss"
+                    d1, d2 = 25, -15
+                elif winner_id == p2_id:
+                    r1, r2 = "loss", "win"
+                    d1, d2 = -15, 25
+                else:
+                    r1, r2 = "draw", "draw"
+                    d1, d2 = 0, 0
+
+                await duel_queries.apply_rating_delta(conn, p1_id, gid, mode, d1, r1, is_bot)
+                if p2_id:
+                    await duel_queries.apply_rating_delta(conn, p2_id, gid, mode, d2, r2, is_bot)
+
         if _bot_instance:
             import asyncio
             asyncio.create_task(_broadcast_discord_duel_update(duel_id, discord_id, prob["title"], finished, winner_id))
@@ -548,35 +628,45 @@ async def verify_duel_submission_api(request: web.Request) -> web.Response:
         return _json({"error": str(e)}, status=500)
 
 
+_duel_discord_rooms: dict[int, dict] = {}
+
+_webhook_cache_api: dict[int, discord.Webhook] = {}
+
+async def _get_webhook_api(channel) -> discord.Webhook | None:
+    if channel.id in _webhook_cache_api:
+        return _webhook_cache_api[channel.id]
+    try:
+        webhooks = await channel.webhooks()
+        for wh in webhooks:
+            if wh.name == "Z4s":
+                _webhook_cache_api[channel.id] = wh
+                return wh
+        wh = await channel.create_webhook(name="Z4s")
+        _webhook_cache_api[channel.id] = wh
+        return wh
+    except Exception as e:
+        print(f"[api/webhook] Failed to get/create webhook: {e}", flush=True)
+        return None
+
+async def _send_branded_api(channel, content=None, embed=None, **kwargs):
+    wh = await _get_webhook_api(channel)
+    if wh:
+        try:
+            return await wh.send(
+                content=content, embed=embed,
+                username="Z4s",
+                avatar_url="https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Zodiac_Z408.png",
+                wait=True, **kwargs)
+        except Exception as e:
+            print(f"[api/webhook] Send failed, fallback: {e}", flush=True)
+    return await channel.send(content=content, embed=embed, **kwargs)
+
+
 async def _broadcast_discord_duel_start(duel_id: int, p1_id: str, p2_id: str | None, mode: str, problems: list[dict]):
     if not _bot_instance:
         return
     try:
         import discord
-        mode_channel = mode.replace("_", "-")
-        channel_names = [mode_channel, mode, "duels-blitz", "cp-dsa", "general"]
-        target_channel = None
-
-        for guild in _bot_instance.guilds:
-            for ch in guild.text_channels:
-                if ch.name.lower() in channel_names:
-                    target_channel = ch
-                    break
-            if target_channel:
-                break
-
-        if not target_channel:
-            for guild in _bot_instance.guilds:
-                if guild.text_channels:
-                    target_channel = guild.text_channels[0]
-                    break
-
-        if not target_channel:
-            return
-
-        async with get_pool().acquire() as conn:
-            await conn.execute("UPDATE duels SET channel_id = $1 WHERE id = $2", str(target_channel.id), duel_id)
-
         mode_title = mode.replace("_", " ").upper()
         prob_lines = []
         for p in problems:
@@ -586,18 +676,206 @@ async def _broadcast_discord_duel_start(duel_id: int, p1_id: str, p2_id: str | N
             diff = p.get("difficulty_label", "Medium")
             prob_lines.append(f"• **Game {g_num}**: [{title}]({url}) `[{diff}]`")
 
-        em = discord.Embed(
-            title=f"⚔️ NEW {mode_title} MATCH STARTED!",
-            description=(
-                f"**Match #{duel_id}** is now live!\n\n"
-                f"👤 **Player 1**: `{p1_id}`\n"
-                f"⚔️ **Player 2**: `{p2_id or 'CP-Bot AI 🤖'}`\n\n"
-                f"🎯 **Problems**:\n" + "\n".join(prob_lines) + "\n\n"
-                f"🎮 *Playing & broadcasting live on Binary Beats Web Arena!*"
+        mode_channel = mode.replace("_", "-")
+        channel_names = [mode_channel, mode, "duels-blitz", "cp-dsa", "general"]
+        public_channel = None
+        guild = None
+
+        for g in _bot_instance.guilds:
+            for ch in g.text_channels:
+                if ch.name.lower() in channel_names:
+                    public_channel = ch
+                    guild = g
+                    break
+            if public_channel:
+                break
+
+        if not public_channel:
+            for g in _bot_instance.guilds:
+                if g.text_channels:
+                    public_channel = g.text_channels[0]
+                    guild = g
+                    break
+
+        if not guild or not public_channel:
+            return
+
+        def find_member(user_str: str | None):
+            if not user_str:
+                return None
+            for m in guild.members:
+                if str(m.id) == user_str or m.name.lower() == user_str.lower() or (m.global_name and m.global_name.lower() == user_str.lower()):
+                    return m
+            return None
+
+        m1 = find_member(p1_id)
+        m2 = find_member(p2_id) if p2_id else None
+
+        cat_name = "Duels"
+        category = discord.utils.get(guild.categories, name=cat_name)
+        if not category:
+            try:
+                category = await guild.create_category(cat_name)
+            except Exception:
+                category = None
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=True,
+                read_message_history=False,
+                send_messages=False,
+                add_reactions=False,
+                manage_channels=False,
+                manage_messages=False,
             ),
-            color=0xFEE75C,
-        )
-        await target_channel.send(embed=em)
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True,
+                read_messages=True,
+                send_messages=True,
+                embed_links=True,
+                attach_files=True,
+                manage_messages=True,
+                manage_channels=True,
+            ),
+        }
+        if m1:
+            overwrites[m1] = discord.PermissionOverwrite(
+                view_channel=True, read_messages=True, send_messages=True,
+                read_message_history=True, add_reactions=True,
+                manage_channels=False, manage_messages=False
+            )
+        if m2:
+            overwrites[m2] = discord.PermissionOverwrite(
+                view_channel=True, read_messages=True, send_messages=True,
+                read_message_history=True, add_reactions=True,
+                manage_channels=False, manage_messages=False
+            )
+
+        private_channel = None
+        try:
+            family = "dsa" if "dsa" in mode else ("icpc" if "icpc" in mode else "cp")
+            kind = "duel" if mode.endswith("_duel") else "blitz"
+            p1_tag = m1.name if m1 else p1_id
+            p2_tag = m2.name if m2 else (p2_id or "Z4s")
+            chan_name = f"{family}-{kind}-{duel_id}-{p1_tag}-vs-{p2_tag}".lower().replace(" ", "-")[:100]
+            private_channel = await guild.create_text_channel(
+                name=chan_name,
+                category=category,
+                overwrites=overwrites,
+                reason=f"Binary Beats Match #{duel_id}"
+            )
+        except Exception as e:
+            print(f"[api/broadcast] Could not create private match channel: {e}")
+
+        pub_em = discord.Embed(title="__Match room is live.__", color=0x57F287)
+        if private_channel:
+            pub_em.description = f"→ {private_channel.mention}"
+        else:
+            pub_em.description = f"→ Web Arena"
+        pub_em.set_footer(text="Tap the channel to jump straight in.", icon_url="https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats.webp")
+
+        pub_msg = await _send_branded_api(public_channel, embed=pub_em)
+
+        _duel_discord_rooms[duel_id] = {
+            "public_channel_id": public_channel.id,
+            "broadcast_msg_id": pub_msg.id if pub_msg else None,
+            "private_channel_id": private_channel.id if private_channel else None,
+        }
+
+        async with get_pool().acquire() as conn:
+            chan_to_save = private_channel.id if private_channel else public_channel.id
+            await conn.execute("UPDATE duels SET channel_id = $1 WHERE id = $2", str(chan_to_save), duel_id)
+
+        if private_channel:
+            p1_title = problems[0].get("title", "Problem 1") if problems else "Problem 1"
+            p1_url = problems[0].get("url", "") if problems else ""
+            p1_diff = problems[0].get("difficulty_label", "Medium") if problems else "Medium"
+
+            p1_tag = m1.display_name if m1 else p1_id
+            p2_tag = m2.display_name if m2 else (p2_id or "Z4s")
+
+            async with get_pool().acquire() as conn:
+                p1_r = await duel_queries.get_or_create_rating(conn, p1_id, str(guild.id), mode)
+                p2_r = await duel_queries.get_or_create_rating(conn, p2_id, str(guild.id), mode) if p2_id else {"rating": 800}
+
+            import duel_ranks
+            p1_rank = duel_ranks.get_rank(p1_r["rating"])
+            p2_rank = duel_ranks.get_rank(p2_r["rating"])
+
+            lines = [
+                p1_tag,
+                f"{p1_rank['name']} · {p1_r['rating']}",
+                "",
+                "VS",
+                "",
+                f"{p2_rank['name']} · {p2_r['rating']}",
+                p2_tag,
+            ]
+            w = max(len(l) for l in lines) + 4
+            vs_box = "```\n" + "\n".join(l.center(w) for l in lines) + "\n```"
+
+            tot_probs = len(problems) if problems else 3
+            mode_label = "LC Blitz" if mode == "dsa_blitz" else ("LC Duel" if mode == "dsa_duel" else ("CF Blitz" if mode == "cp_blitz" else "CF Duel"))
+            mode_blurb = "LeetCode speed race" if "dsa" in mode else "Codeforces speed race"
+
+            room_em = discord.Embed(
+                title=f"__{mode_label} — Match #{duel_id}__",
+                description=(
+                    f"**{mode_blurb}** · **{tot_probs}** problems, one at a time\n\n"
+                    f"{vs_box}\n\n"
+                    f"First verified solve takes each problem.\n"
+                    f"Timer expires → draw → next problem."
+                ),
+                color=0x00D9FF
+            )
+            room_em.set_author(name="Binary Beats", icon_url="https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats.webp")
+            room_em.set_image(url="https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats%20Banner.jpeg")
+            room_em.add_field(name=f"__Problem 1/{tot_probs}__", value=f"[{p1_title}]({p1_url})", inline=True)
+            room_em.add_field(name="__Difficulty__", value=f"`{p1_diff}`", inline=True)
+            room_em.add_field(name="__Time Limit__", value="`25 min`", inline=True)
+            room_em.set_footer(text="First verified solve takes this problem · Forfeit costs 16 rating", icon_url="https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats.webp")
+
+            CD_ART = {
+                7: "███████\n     ██\n    ██\n   ██\n  ██",
+                6: " █████\n██\n██████\n██  ██\n █████",
+                5: "██████\n██\n█████\n    ██\n█████",
+                4: "██  ██\n██  ██\n██████\n    ██\n    ██",
+                3: "█████\n   ██\n ████\n   ██\n█████",
+                2: " █████\n    ██\n ████\n██\n██████",
+                1: "  ██\n ███\n  ██\n  ██\n██████",
+                0: " ████  ████  ██\n██    ██  ██ ██\n██ ██ ██  ██ ██\n██  █ ██  ██   ",
+            }
+
+            def format_cd(sec: int) -> str:
+                art = CD_ART.get(sec, CD_ART[0])
+                art_lines = art.split("\n")
+                gw = max(len(l) for l in art_lines)
+                padded = [l.ljust(gw) for l in art_lines]
+                pad_w = max(gw + 6, 18)
+                centered = "\n".join(l.center(pad_w) for l in padded)
+                return f"```ansi\n\x1b[1;36m{centered}\x1b[0m\n```"
+
+            cd_msg = await private_channel.send(format_cd(7))
+            await private_channel.send(embed=room_em)
+            
+            p1_mention = m1.mention if m1 else f"`{p1_id}`"
+            p2_mention = m2.mention if m2 else f"`{p2_id or 'Z4s'}`"
+            await _send_branded_api(private_channel, content=f"{p1_mention} {p2_mention} — the arena is live. Good luck.")
+
+            async def animate_cd():
+                try:
+                    for i in range(6, 0, -1):
+                        await asyncio.sleep(1)
+                        await cd_msg.edit(content=format_cd(i))
+                    await asyncio.sleep(1)
+                    await cd_msg.edit(content=format_cd(0))
+                    await asyncio.sleep(2)
+                    await cd_msg.delete()
+                except Exception:
+                    pass
+
+            asyncio.create_task(animate_cd())
+
     except Exception as e:
         print(f"[api/broadcast] Match start broadcast error: {e}")
 
@@ -612,47 +890,123 @@ async def _broadcast_discord_duel_update(duel_id: int, solver_id: str, prob_titl
         if not duel:
             return
 
-        target_channel = None
-        if duel.get("channel_id"):
-            target_channel = _bot_instance.get_channel(int(duel["channel_id"]))
-
-        if not target_channel:
-            mode = duel.get("mode", "dsa_blitz")
-            mode_channel = mode.replace("_", "-")
-            channel_names = [mode_channel, mode, "duels-blitz", "cp-dsa"]
-            for guild in _bot_instance.guilds:
-                for ch in guild.text_channels:
-                    if ch.name.lower() in channel_names:
-                        target_channel = ch
-                        break
-                if target_channel:
-                    break
-
-        if not target_channel:
-            return
-
         import discord
+        import asyncio
+        import duel_ranks
+        from datetime import datetime, timedelta, timezone
+        IST = timezone(timedelta(hours=5, minutes=30))
+
         p1 = duel["player1_id"]
-        p2 = duel["player2_id"] or "CP-Bot AI 🤖"
+        p2 = duel["player2_id"] or "Z4s"
         p1_won = duel["p1_games_won"]
         p2_won = duel["p2_games_won"]
+        mode = duel["mode"]
+        tot_games = duel.get("total_games", 3)
 
-        score_line = f"📊 **Scoreboard**: `{p1}` ({p1_won}) — ({p2_won}) `{p2}`"
+        info = _duel_discord_rooms.get(duel_id, {})
+        pub_chan_id = info.get("public_channel_id")
+        pub_msg_id = info.get("broadcast_msg_id")
+        priv_chan_id = info.get("private_channel_id")
 
-        if finished:
-            win_txt = f"🏆 **Match Winner**: `{winner_id}`!" if winner_id else "🤝 **Match Draw!**"
-            em = discord.Embed(
-                title=f"⚡ {prob_title} Solved! — Match Complete",
-                description=f"👤 `{solver_id}` solved the problem!\n\n{score_line}\n\n{win_txt}",
-                color=0x57F287,
-            )
-        else:
-            em = discord.Embed(
-                title=f"⚡ {prob_title} Solved!",
-                description=f"👤 `{solver_id}` solved the problem and took the round!\n\n{score_line}",
-                color=0x00D9FF,
-            )
-        await target_channel.send(embed=em)
+        public_channel = _bot_instance.get_channel(pub_chan_id) if pub_chan_id else None
+        private_channel = _bot_instance.get_channel(priv_chan_id) if priv_chan_id else None
+
+        score_str = f"{p1_won}-{p2_won}"
+        winner_name = p1 if winner_id == p1 else (p2 if winner_id == p2 else ("Draw" if finished else None))
+
+        gid = str(public_channel.guild.id) if public_channel else ""
+        async with pool.acquire() as conn:
+            p1_r = await duel_queries.get_or_create_rating(conn, p1, gid, mode)
+            p2_r = await duel_queries.get_or_create_rating(conn, duel["player2_id"], gid, mode) if duel["player2_id"] else {"rating": duel.get("bot_rating") or 800}
+
+        p1_rank = duel_ranks.get_rank(p1_r["rating"])
+
+        if public_channel and pub_msg_id:
+            try:
+                pub_msg = await public_channel.fetch_message(pub_msg_id)
+                if finished:
+                    is_forfeit = prob_title == "Match Forfeited"
+                    s_title = "__Match Result (Forfeit)__" if is_forfeit else "__Match Result__"
+                    s_color = 0xED4245 if is_forfeit else 0xFEE75C
+
+                    result_line = f"**{winner_name}** wins {score_str}" if winner_name != "Draw" else f"Draw — {score_str}"
+                    if is_forfeit:
+                        result_line += f"\n*{solver_id} forfeited*"
+
+                    updated_em = discord.Embed(
+                        title=s_title,
+                        description=f"Mode: `{mode}` · Match #{duel.get('duel_number', duel_id)} · {tot_games}-Problem\n\n{result_line}",
+                        color=s_color
+                    )
+
+                    p1_delta = -16 if (is_forfeit and solver_id == p1) else 16
+                    p1_arrow = "📈" if p1_delta >= 0 else "📉"
+                    updated_em.add_field(
+                        name=f"{p1_arrow} {p1}",
+                        value=f"`{p1_r['rating']}` → `{p1_r['rating'] + p1_delta}` **({p1_delta:+d})**",
+                        inline=True
+                    )
+                    if duel["player2_id"]:
+                        p2_delta = 16 if (is_forfeit and solver_id == p1) else -16
+                        p2_arrow = "📈" if p2_delta >= 0 else "📉"
+                        updated_em.add_field(
+                            name=f"{p2_arrow} {p2}",
+                            value=f"`{p2_r['rating']}` → `{p2_r['rating'] + p2_delta}` **({p2_delta:+d})**",
+                            inline=True
+                        )
+
+                    updated_em.add_field(name="__Details__", value=f"{p1}: **{p1_rank['name']}**", inline=False)
+                    updated_em.set_author(name="Binary Beats", icon_url="https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats.webp")
+                    updated_em.set_image(url="https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats%20Banner.jpeg")
+                    updated_em.set_footer(text=f"Completed at {datetime.now(IST).strftime('%H:%M:%S IST')}", icon_url="https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats.webp")
+                    await pub_msg.edit(embed=updated_em)
+                else:
+                    updated_em = pub_msg.embeds[0]
+                    updated_em.description = (
+                        f"LIVE UPDATE — Match #{duel_id}\n\n"
+                        f"`{solver_id}` solved **{prob_title}**!\n\n"
+                        f"Scoreboard: `{p1}` ({p1_won}) — ({p2_won}) `{p2}`"
+                    )
+                    await pub_msg.edit(embed=updated_em)
+            except Exception as e:
+                print(f"[api/broadcast] Could not edit public broadcast embed: {e}")
+
+        if private_channel:
+            if finished:
+                win_txt = f"**{winner_name}** wins {score_str}" if winner_name != "Draw" else f"Draw — {score_str}"
+                final_em = discord.Embed(
+                    title="__Match Complete__",
+                    description=f"{win_txt}",
+                    color=0x57F287 if winner_name == p1 else 0xED4245
+                )
+                p1_delta = -16 if (prob_title == "Match Forfeited" and solver_id == p1) else 16
+                final_em.add_field(
+                    name=f"__{p1}__",
+                    value=f"`{p1_r['rating']}` → `{p1_r['rating'] + p1_delta}` ({p1_delta:+d})",
+                    inline=True
+                )
+                if duel["player2_id"]:
+                    p2_delta = 16 if (prob_title == "Match Forfeited" and solver_id == p1) else -16
+                    final_em.add_field(
+                        name=f"__{p2}__",
+                        value=f"`{p2_r['rating']}` → `{p2_r['rating'] + p2_delta}` ({p2_delta:+d})",
+                        inline=True
+                    )
+                final_em.set_footer(text="Posting stats to the public channel… room closes in 10s", icon_url="https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats.webp")
+                await _send_branded_api(private_channel, embed=final_em)
+                await asyncio.sleep(10)
+                try:
+                    await private_channel.delete(reason="Duel finished — auto-destruct")
+                except Exception as e:
+                    print(f"[api/broadcast] Could not delete private channel: {e}")
+            else:
+                solv_em = discord.Embed(
+                    title=f"__Problem Solved: {prob_title}__",
+                    description=f"`{solver_id}` solved the problem and won the round!\n\nScoreboard: `{p1}` ({p1_won}) — ({p2_won}) `{p2}`",
+                    color=0x00D9FF
+                )
+                await _send_branded_api(private_channel, embed=solv_em)
+
     except Exception as e:
         print(f"[api/broadcast] Discord broadcast update failed: {e}")
 
@@ -878,27 +1232,61 @@ async def channel_index(request: web.Request) -> web.Response:
     ]})
 
 
-# ─────────────────────────────  contests (live API fetch)  ─────────
+# ─────────────────────────────  contests (instant cached API)  ─────────
 
-# In-memory cache: fetch from platforms at most once per hour.
-_contests_cache: dict = {"data": [], "fetched_at": 0}
-_CONTESTS_TTL = 3600  # 1 hour
+_contests_cache: dict = {"data": [], "fetched_at": 0, "is_fetching": False}
 
-async def upcoming_contests(request: web.Request) -> web.Response:
-    """GET /api/contests — upcoming contests from CF, LC, CC, AtCoder.
-
-    Reuses the same fetch functions from cogs/contests.py.
-    Caches for 1 hour to avoid rate limits.
-    """
+def _get_initial_contest_fallbacks() -> list[dict]:
     import time
     now = time.time()
-    if now - _contests_cache["fetched_at"] < _CONTESTS_TTL and _contests_cache["data"]:
-        return _json({"contests": _contests_cache["data"], "cached": True})
+    return [
+        {
+            "platform": "cf",
+            "id": "cf-div2-upcoming",
+            "name": "Codeforces Round (Div. 2)",
+            "start_ts": now + 86400 * 2,
+            "duration": 7200,
+            "url": "https://codeforces.com/contests",
+            "start_iso": dt.datetime.fromtimestamp(now + 86400 * 2, tz=dt.timezone.utc).isoformat(),
+        },
+        {
+            "platform": "lc",
+            "id": "lc-weekly-upcoming",
+            "name": "LeetCode Weekly Contest",
+            "start_ts": now + 86400 * 5,
+            "duration": 5400,
+            "url": "https://leetcode.com/contest/",
+            "start_iso": dt.datetime.fromtimestamp(now + 86400 * 5, tz=dt.timezone.utc).isoformat(),
+        },
+        {
+            "platform": "atcoder",
+            "id": "abc-upcoming",
+            "name": "AtCoder Beginner Contest",
+            "start_ts": now + 86400 * 6,
+            "duration": 6000,
+            "url": "https://atcoder.jp/contests/",
+            "start_iso": dt.datetime.fromtimestamp(now + 86400 * 6, tz=dt.timezone.utc).isoformat(),
+        },
+        {
+            "platform": "cc",
+            "id": "cc-starters-upcoming",
+            "name": "CodeChef Starters",
+            "start_ts": now + 86400 * 3,
+            "duration": 7200,
+            "url": "https://www.codechef.com/contests",
+            "start_iso": dt.datetime.fromtimestamp(now + 86400 * 3, tz=dt.timezone.utc).isoformat(),
+        },
+    ]
 
+
+async def _bg_refresh_contests():
+    if _contests_cache["is_fetching"]:
+        return
+    _contests_cache["is_fetching"] = True
     try:
+        import time
         from cogs.contests import fetch_all_contests
         contests = await fetch_all_contests()
-        # Serialize for JSON
         result = []
         for c in contests:
             result.append({
@@ -912,15 +1300,29 @@ async def upcoming_contests(request: web.Request) -> web.Response:
                     c["start_ts"], tz=dt.timezone.utc
                 ).isoformat(),
             })
-        _contests_cache["data"] = result
-        _contests_cache["fetched_at"] = now
-        return _json({"contests": result, "cached": False})
+        if result:
+            _contests_cache["data"] = result
+            _contests_cache["fetched_at"] = time.time()
+            print(f"[api/contests] Background fetch success → {len(result)} upcoming contests cached.", flush=True)
     except Exception as e:
-        print(f"[api/contests] fetch error: {e}", flush=True)
-        # Return stale cache if available
-        if _contests_cache["data"]:
-            return _json({"contests": _contests_cache["data"], "cached": True, "stale": True})
-        return _json({"contests": [], "error": str(e)}, status=502)
+        print(f"[api/contests] Background fetch error: {e}", flush=True)
+    finally:
+        _contests_cache["is_fetching"] = False
+
+
+async def upcoming_contests(request: web.Request) -> web.Response:
+    """GET /api/contests — Instant 0ms response from memory cache.
+    Triggers asynchronous background refresh if cache is older than 30 mins.
+    """
+    import time
+    import asyncio
+    now = time.time()
+
+    if not _contests_cache["data"] or (now - _contests_cache["fetched_at"] > 1800):
+        asyncio.create_task(_bg_refresh_contests())
+
+    data = _contests_cache["data"] if _contests_cache["data"] else _get_initial_contest_fallbacks()
+    return _json({"contests": data, "cached": True})
 
 
 # ─────────────────────────────  wiring  ─────────────────────────────
@@ -1036,6 +1438,325 @@ async def get_hardtests(request: web.Request) -> web.Response:
         return _json({"error": str(e)}, status=500)
 
 
+async def forfeit_duel_api(request: web.Request) -> web.Response:
+    """POST /api/duels/forfeit — Handles user force quit / forfeit with intelligent Elo rating penalty."""
+    try:
+        body = await request.json()
+        duel_id = int(body.get("duel_id", 0))
+        forfeiter_id = str(body.get("discord_id", ""))
+
+        if not duel_id or not forfeiter_id:
+            return _json({"error": "duel_id and discord_id are required"}, status=400)
+
+        gid = _guild(request)
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            duel = await duel_queries.get_duel(conn, duel_id)
+            if not duel or duel["status"] != "active":
+                return _json({"error": "duel not active or not found"}, status=404)
+
+            p1_id = duel["player1_id"]
+            p2_id = duel["player2_id"]
+            is_bot = duel.get("is_bot_match", False)
+            mode = duel["mode"]
+
+            p1_row = await duel_queries.get_or_create_rating(conn, p1_id, gid, mode)
+            p1_old = p1_row["rating"]
+
+            if p2_id:
+                p2_row = await duel_queries.get_or_create_rating(conn, p2_id, gid, mode)
+                p2_old = p2_row["rating"]
+            else:
+                p2_old = duel.get("bot_rating") or 1200
+
+            winner_id = p2_id if forfeiter_id == p1_id else p1_id
+            await duel_queries.finish_duel(conn, duel_id, winner_id)
+
+            if mode.startswith("dsa"):
+                d1 = -12 if forfeiter_id == p1_id else 22
+                d2 = 22 if forfeiter_id == p1_id else -12
+                r1 = "loss" if forfeiter_id == p1_id else "win"
+                r2 = "win" if forfeiter_id == p1_id else "loss"
+            else:
+                k = 40 if "icpc" in mode else (32 if mode.endswith("_duel") else 24)
+                s1 = 0.0 if forfeiter_id == p1_id else 1.0
+                s2 = 1.0 if forfeiter_id == p1_id else 0.0
+                expected1 = 1.0 / (1.0 + 10 ** ((p2_old - p1_old) / 400.0))
+                expected2 = 1.0 / (1.0 + 10 ** ((p1_old - p2_old) / 400.0))
+                d1 = round(k * (s1 - expected1))
+                d2 = round(k * (s2 - expected2))
+                r1 = "loss" if forfeiter_id == p1_id else "win"
+                r2 = "win" if forfeiter_id == p1_id else "loss"
+
+            await duel_queries.apply_rating_delta(conn, p1_id, gid, mode, d1, r1, is_bot)
+            if p1_id:
+                p1_new_row = await duel_queries.get_or_create_rating(conn, p1_id, gid, mode)
+                p1_new = p1_new_row["rating"]
+            else:
+                p1_new = p1_old + d1
+
+            if p2_id:
+                p2_new_row = await duel_queries.get_or_create_rating(conn, p2_id, gid, mode)
+                p2_new = p2_new_row["rating"]
+            else:
+                p2_new = p2_old
+
+        if _bot_instance:
+            import asyncio
+            asyncio.create_task(_broadcast_discord_duel_update(duel_id, forfeiter_id, "Match Forfeited", True, winner_id))
+
+        return _json({
+            "status": "forfeited",
+            "winner_id": winner_id,
+            "forfeited_by": forfeiter_id,
+            "p1_old_rating": p1_old,
+            "p1_new_rating": p1_new,
+            "p1_rating_change": d1,
+            "p2_old_rating": p2_old,
+            "p2_new_rating": p2_new,
+            "p2_rating_change": d2 if p2_id else 0,
+        })
+    except Exception as e:
+        print(f"[api/duels/forfeit] error: {e}")
+        return _json({"error": str(e)}, status=500)
+
+
+# ───────────────────────────── COMMUNITY API ─────────────────────────────
+
+async def get_community_threads_api(request: web.Request) -> web.Response:
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id, title, author, avatar, avatar_url, post_image_url, content, tag, upvotes, comments_count,
+                       to_char(created_at, 'YYYY-MM-DD HH24:MI') as date, comments_json
+                FROM community_threads
+                ORDER BY created_at DESC LIMIT 50
+            """)
+            result = []
+            for r in rows:
+                c_data = r["comments_json"]
+                comments = json.loads(c_data) if isinstance(c_data, str) else (c_data or [])
+                result.append({
+                    "id": r["id"],
+                    "title": r["title"],
+                    "author": r["author"],
+                    "avatar": r["avatar"],
+                    "avatarUrl": r["avatar_url"],
+                    "postImageUrl": r["post_image_url"],
+                    "content": r["content"],
+                    "tag": r["tag"],
+                    "upvotes": r["upvotes"],
+                    "commentsCount": r["comments_count"],
+                    "date": r["date"] or "Just now",
+                    "comments": comments
+                })
+            return _json(result)
+    except Exception as e:
+        print(f"[api/community/threads] error: {e}")
+        return _json([], status=200)
+
+
+async def create_community_thread_api(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+        thread_id = data.get("id") or f"t_{int(dt.datetime.now().timestamp()*1000)}"
+        title = data.get("title", "").strip()
+        author = data.get("author", "anonymous").strip()
+        avatar = data.get("avatar", "BB").strip()
+        avatar_url = data.get("avatarUrl")
+        post_image_url = data.get("postImageUrl")
+        content = data.get("content", "").strip()
+        tag = data.get("tag", "Solutions").strip()
+
+        if not title or not content:
+            return _json({"error": "Title and content required"}, status=400)
+
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO community_threads (id, title, author, avatar, avatar_url, post_image_url, content, tag, upvotes, comments_count, comments_json)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, 0, '[]'::jsonb)
+                ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, post_image_url = EXCLUDED.post_image_url
+            """, thread_id, title, author, avatar, avatar_url, post_image_url, content, tag)
+        return _json({"status": "created", "id": thread_id})
+    except Exception as e:
+        print(f"[api/community/create] error: {e}")
+        return _json({"error": str(e)}, status=500)
+
+
+async def upvote_community_thread_api(request: web.Request) -> web.Response:
+    thread_id = request.match_info.get("id", "")
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE community_threads SET upvotes = upvotes + 1 WHERE id = $1", thread_id)
+        return _json({"status": "upvoted"})
+    except Exception as e:
+        return _json({"error": str(e)}, status=500)
+
+
+async def comment_community_thread_api(request: web.Request) -> web.Response:
+    thread_id = request.match_info.get("id", "")
+    try:
+        data = await request.json()
+        comment = {
+            "id": data.get("id") or f"c_{int(dt.datetime.now().timestamp()*1000)}",
+            "author": data.get("author", "anonymous"),
+            "avatar": data.get("avatar", "BB"),
+            "avatarUrl": data.get("avatarUrl"),
+            "content": data.get("content", "").strip(),
+            "date": "Just now"
+        }
+
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT comments_json FROM community_threads WHERE id = $1", thread_id)
+            if not row:
+                return _json({"error": "Thread not found"}, status=404)
+
+            c_data = row["comments_json"]
+            existing_comments = json.loads(c_data) if isinstance(c_data, str) else (c_data or [])
+            existing_comments.append(comment)
+
+            await conn.execute("""
+                UPDATE community_threads 
+                SET comments_json = $2::jsonb, comments_count = array_length(ARRAY(SELECT jsonb_array_elements($2::jsonb)), 1)
+                WHERE id = $1
+            """, thread_id, json.dumps(existing_comments))
+
+        return _json({"status": "commented", "comment": comment})
+    except Exception as e:
+        return _json({"error": str(e)}, status=500)
+
+
+async def delete_community_thread_api(request: web.Request) -> web.Response:
+    thread_id = request.match_info.get("id", "")
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM community_threads WHERE id = $1", thread_id)
+        return _json({"status": "deleted"})
+    except Exception as e:
+        return _json({"error": str(e)}, status=500)
+
+
+async def delete_community_comment_api(request: web.Request) -> web.Response:
+    thread_id = request.match_info.get("id", "")
+    comment_id = request.match_info.get("cid", "")
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT comments_json FROM community_threads WHERE id = $1", thread_id)
+            if row:
+                c_data = row["comments_json"]
+                existing_comments = json.loads(c_data) if isinstance(c_data, str) else (c_data or [])
+                updated_comments = [c for c in existing_comments if c.get("id") != comment_id]
+                await conn.execute("""
+                    UPDATE community_threads 
+                    SET comments_json = $2::jsonb, comments_count = $3
+                    WHERE id = $1
+                """, thread_id, json.dumps(updated_comments), len(updated_comments))
+        return _json({"status": "comment_deleted"})
+    except Exception as e:
+        return _json({"error": str(e)}, status=500)
+
+
+# ───────────────────────────── DISCORD OAUTH ─────────────────────────────
+
+async def discord_login_api(request: web.Request) -> web.Response:
+    client_id = os.getenv("DISCORD_CLIENT_ID", "1519084550226051102")
+    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or "www.binarybeats.in"
+    scheme = request.headers.get("X-Forwarded-Proto", "https")
+    if "localhost" in host:
+        scheme = "http"
+
+    redirect_uri = f"{scheme}://{host}/api/discord/callback"
+    from urllib.parse import quote
+    auth_url = (
+        f"https://discord.com/oauth2/authorize?client_id={client_id}"
+        f"&redirect_uri={quote(redirect_uri, safe='')}&response_type=code&scope=identify"
+    )
+    raise web.HTTPFound(location=auth_url)
+
+
+async def discord_callback_api(request: web.Request) -> web.Response:
+    code = request.query.get("code")
+    client_id = os.getenv("DISCORD_CLIENT_ID", "1519084550226051102")
+    client_secret = os.getenv("DISCORD_CLIENT_SECRET", "HB8O8piuilNlr94nCq02cmu1Hg7vuTJx")
+    
+    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or "www.binarybeats.in"
+    scheme = request.headers.get("X-Forwarded-Proto", "https")
+    if "localhost" in host:
+        scheme = "http"
+
+    redirect_uri = f"{scheme}://{host}/api/discord/callback"
+    origin_base = f"{scheme}://{host}"
+
+    if not code:
+        raise web.HTTPFound(location=f"{origin_base}/?auth=error")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://discord.com/api/v10/oauth2/token", data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri
+            }) as resp:
+                if resp.status != 200:
+                    print(f"[api/discord/callback] Token error status: {resp.status}")
+                    raise web.HTTPFound(location=f"{origin_base}/?auth=token_error")
+                token_data = await resp.json()
+                access_token = token_data.get("access_token")
+
+            async with session.get("https://discord.com/api/v10/users/@me", headers={
+                "Authorization": f"Bearer {access_token}"
+            }) as me_resp:
+                if me_resp.status != 200:
+                    raise web.HTTPFound(location="https://www.binarybeats.in/?auth=user_error")
+                user = await me_resp.json()
+
+        avatar_url = (
+            f"https://cdn.discordapp.com/avatars/{user.get('id')}/{user.get('avatar')}.png"
+            if user.get("avatar")
+            else "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Zodiac_Z408.png"
+        )
+        user_session = {
+            "id": user.get("id"),
+            "username": user.get("username"),
+            "globalName": user.get("global_name") or user.get("username"),
+            "avatarUrl": avatar_url
+        }
+
+        response = web.HTTPFound(location=f"{origin_base}/")
+        response.set_cookie("bb_user_session", json.dumps(user_session), max_age=86400*30, httponly=False)
+        return response
+    except web.HTTPFound:
+        raise
+    except Exception as e:
+        print(f"[api/discord/callback] Exception: {e}")
+        raise web.HTTPFound(location=f"{origin_base}/?auth=exception")
+
+
+async def discord_me_api(request: web.Request) -> web.Response:
+    cookie = request.cookies.get("bb_user_session")
+    if cookie:
+        try:
+            data = json.loads(cookie)
+            return _json({"authenticated": True, "user": data})
+        except Exception:
+            pass
+    return _json({"authenticated": False})
+
+
+async def discord_logout_api(request: web.Request) -> web.Response:
+    response = _json({"status": "logged_out"})
+    response.del_cookie("bb_user_session")
+    return response
+
+
 def build_app() -> web.Application:
     app = web.Application(middlewares=[_cors])
     r = app.router
@@ -1053,6 +1774,17 @@ def build_app() -> web.Application:
     r.add_post("/api/duels/create", create_duel_api)
     r.add_get("/api/duels/state/{id}", get_duel_state_api)
     r.add_post("/api/duels/verify", verify_duel_submission_api)
+    r.add_post("/api/duels/forfeit", forfeit_duel_api)
+    r.add_get("/api/community/threads", get_community_threads_api)
+    r.add_post("/api/community/threads", create_community_thread_api)
+    r.add_post("/api/community/threads/{id}/upvote", upvote_community_thread_api)
+    r.add_post("/api/community/threads/{id}/comments", comment_community_thread_api)
+    r.add_delete("/api/community/threads/{id}", delete_community_thread_api)
+    r.add_delete("/api/community/threads/{id}/comments/{cid}", delete_community_comment_api)
+    r.add_get("/api/discord/login", discord_login_api)
+    r.add_get("/api/discord/callback", discord_callback_api)
+    r.add_get("/api/discord/me", discord_me_api)
+    r.add_post("/api/discord/logout", discord_logout_api)
     r.add_get("/api/announcements", announcements)
     r.add_get("/api/channels", channel_index)
     r.add_get("/api/channels/{key}/messages", channel_messages)

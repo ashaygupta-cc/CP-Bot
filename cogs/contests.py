@@ -61,12 +61,11 @@ PLATFORMS = {
 # Tolerance = how wide a band around the threshold to fire in (task runs every 30m)
 REMINDER_WINDOWS = [
     ("12h", 12 * 3600, 30 * 60),
-    ("6h",   6 * 3600, 30 * 60),
     ("1h",   1 * 3600, 30 * 60),
 ]
 
 POLL_MINUTES   = 30
-FETCH_DAYS     = 7     # fetch contests starting within next 7 days
+FETCH_DAYS     = 180    # fetch ALL contests starting within next 180 days (full upcoming schedule)
 
 
 # ── Branding + webhook identity ────────────────────────────────────────────────
@@ -435,19 +434,10 @@ async def _fetch_cc(session: aiohttp.ClientSession) -> list[dict]:
 
 async def _fetch_atcoder(session: aiohttp.ClientSession) -> list[dict]:
     """
-    AtCoder upcoming contests.
-
-    kenkoooo.com's `contests.json` has stopped reflecting newly-announced
-    AtCoder contests (confirmed dead/stale since mid-2026), and the kontests.net
-    aggregator times out from this host. Instead we scrape AtCoder's own
-    contest list page directly — the same atcoder.jp domain the submission
-    checker (`platforms/atcoder.py`) already reaches successfully from this
-    host — and, like that checker, attach the stored REVEL_SESSION cookie
-    (set via `!setcookie`) if one is available, since a logged-in session is
-    what makes those requests reliable. kontests.net and kenkoooo are kept
-    as fallbacks.
+    AtCoder upcoming contests — fetches all future contests with fast, tight timeouts (4s max).
+    Scrapes atcoder.jp directly, with fallbacks to competeapi and kenkoooo.
     """
-    now_ts  = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(timezone.utc).timestamp()
     results: list[dict] = []
 
     # ── Primary: scrape atcoder.jp's own contest list page ──────────────────
@@ -467,25 +457,27 @@ async def _fetch_atcoder(session: aiohttp.ClientSession) -> list[dict]:
             headers["Cookie"] = f"REVEL_SESSION={cookie_val}"
 
         async with session.get(
-            url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
+            url, headers=headers, timeout=aiohttp.ClientTimeout(total=4)
         ) as r:
-            print(f"[contests/atcoder] HTTP {r.status} for {url} (cookie={'yes' if cookie_val else 'no'})", flush=True)
-            if r.status != 200:
-                print(f"[contests/atcoder] atcoder.jp returned HTTP {r.status}", flush=True)
-            else:
+            html = ""
+            if r.status == 200:
                 html = await r.text()
+            elif r.status == 403 and cookie_val:
+                headers.pop("Cookie", None)
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=3)) as r2:
+                    if r2.status == 200:
+                        html = await r2.text()
+
+            if html:
                 marker = 'id="contest-table-upcoming"'
                 idx = html.find(marker)
-                if idx == -1:
-                    print("[contests/atcoder] upcoming-table marker not found in page", flush=True)
-                else:
+                if idx != -1:
                     chunk = html[idx:]
                     next_idx = chunk.find('id="contest-table-', len(marker))
                     if next_idx != -1:
                         chunk = chunk[:next_idx]
 
                     all_rows = re.findall(r"<tr[^>]*>(.*?)</tr>", chunk, flags=re.S)
-                    print(f"[contests/atcoder] found {len(all_rows)} <tr> rows in upcoming chunk", flush=True)
 
                     for row in all_rows:
                         date_m = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{4})", row)
@@ -497,7 +489,7 @@ async def _fetch_atcoder(session: aiohttp.ClientSession) -> list[dict]:
                             start_ts = start_dt.astimezone(timezone.utc).timestamp()
                         except Exception:
                             continue
-                        if start_ts <= now_ts or start_ts - now_ts > FETCH_DAYS * 86400:
+                        if start_ts <= now_ts:
                             continue
 
                         cid  = link_m.group(1)
@@ -516,96 +508,70 @@ async def _fetch_atcoder(session: aiohttp.ClientSession) -> list[dict]:
                             "url":      f"https://atcoder.jp/contests/{cid}",
                         })
     except Exception as e:
-        print(f"[contests/atcoder] atcoder.jp scrape error: {type(e).__name__}: {e}", flush=True)
+        print(f"[contests/atcoder] atcoder.jp scrape error: {e}", flush=True)
 
-    print(f"[contests/atcoder] atcoder.jp scrape parsed → {len(results)} upcoming contest(s)", flush=True)
     if results:
         return results
 
-    # ── Fallback 1: kontests.net aggregator ─────────────────────────────────
+    # ── Fallback 1: competeapi.vercel.app ───────────────────────────────────
     try:
-        url = "https://kontests.net/api/v1/at_coder"
+        url = "https://competeapi.vercel.app/contests/atcoder/"
         headers = {"User-Agent": "Mozilla/5.0 (compatible; CPBot/1.0)", "Accept": "application/json"}
-        async with session.get(
-            url, headers=headers, timeout=aiohttp.ClientTimeout(total=12)
-        ) as r:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=4)) as r:
             if r.status == 200:
                 data = await r.json(content_type=None)
-                for c in data:
-                    status = (c.get("status") or "").upper()
-                    if status and status != "BEFORE":
+                comp_list = data.get("future_contests") or data.get("contests") or (data if isinstance(data, list) else [])
+                for c in comp_list:
+                    if not isinstance(c, dict):
                         continue
-
-                    start_ts = _parse_iso(c.get("start_time", ""))
+                    start_str = c.get("contest_start_date_iso") or c.get("contest_start_date") or c.get("start_time", "")
+                    start_ts = _parse_iso(start_str)
                     if not start_ts or start_ts <= now_ts:
                         continue
-                    if start_ts - now_ts > FETCH_DAYS * 86400:
-                        continue
-
-                    end_ts = _parse_iso(c.get("end_time", ""))
-                    duration = 0
-                    raw_dur = c.get("duration")
-                    if raw_dur:
-                        try:
-                            duration = int(raw_dur)
-                        except (TypeError, ValueError):
-                            duration = 0
-                    if not duration and end_ts:
-                        duration = int(end_ts - start_ts)
-
-                    name = c.get("name", "AtCoder Contest")
-                    link = c.get("url", "")
-                    cid  = link.rstrip("/").rsplit("/", 1)[-1] if link else name
-
+                    cid = c.get("contest_code") or c.get("id") or ""
+                    name = c.get("contest_name") or c.get("title") or c.get("name") or "AtCoder Contest"
                     results.append({
                         "key":      "atcoder",
                         "id":       cid,
                         "name":     name,
                         "start_ts": float(start_ts),
-                        "duration": duration,
-                        "url":      link or "https://atcoder.jp/contests/",
+                        "duration": 7200,
+                        "url":      f"https://atcoder.jp/contests/{cid}",
                     })
-            else:
-                print(f"[contests/atcoder] kontests.net returned HTTP {r.status}", flush=True)
+                if results:
+                    return results
     except Exception as e:
-        print(f"[contests/atcoder] kontests.net fetch error: {type(e).__name__}: {e}", flush=True)
+        print(f"[contests/atcoder] competeapi fetch error: {e}", flush=True)
 
-    if results:
-        return results
-
-    # ── Fallback 2: kenkoooo community JSON (may be stale) ──────────────────
+    # ── Fallback 2: kenkoooo community JSON (fast 3.5s timeout) ────────────
     try:
         url = "https://kenkoooo.com/atcoder/resources/contests.json"
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; CPBot/1.0)"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         async with session.get(
-            url,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=12),
+            url, headers=headers, timeout=aiohttp.ClientTimeout(total=3.5)
         ) as r:
-            if r.status != 200:
-                return []
-            data = await r.json(content_type=None)
-
-        for c in data:
-            start_ts = c.get("start_epoch_second", 0)
-            if not start_ts or start_ts <= now_ts:
-                continue
-            if start_ts - now_ts > FETCH_DAYS * 86400:
-                continue
-            duration = c.get("duration_second", 0)
-            cid      = c.get("id", "")
-            results.append({
-                "key":      "atcoder",
-                "id":       cid,
-                "name":     c.get("title", "AtCoder Contest"),
-                "start_ts": float(start_ts),
-                "duration": duration,
-                "url":      f"https://atcoder.jp/contests/{cid}",
-            })
-        return results
+            if r.status == 200:
+                data = await r.json(content_type=None)
+                for c in data:
+                    start_ts = c.get("start_epoch_second", 0)
+                    if not start_ts or start_ts <= now_ts:
+                        continue
+                    duration = c.get("duration_second", 0)
+                    cid      = c.get("id", "")
+                    results.append({
+                        "key":      "atcoder",
+                        "id":       cid,
+                        "name":     c.get("title", "AtCoder Contest"),
+                        "start_ts": float(start_ts),
+                        "duration": duration,
+                        "url":      f"https://atcoder.jp/contests/{cid}",
+                    })
+                if results:
+                    return results
     except Exception as e:
-        print(f"[contests/atcoder] kenkoooo fetch error: {type(e).__name__}: {e}", flush=True)
-        return []
+        print(f"[contests/atcoder] kenkoooo fetch error: {e}", flush=True)
+
+    return results
 
 
 async def fetch_all_contests() -> list[dict]:
