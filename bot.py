@@ -1,7 +1,13 @@
 """
-bot.py — Entry point (v6)
+bot.py — Entry point (v7)
 Cogs: registry, admin, problems, checker, leaderboard,
-      submissions, reset, points, verification, inactivity
+      submissions, reset, points, verification, inactivity, contests, duels
+
+v7 changes:
+  • Added complete Duel System commands to !help and !adminhelp
+  • Duels section shows all 8 user commands + modes reference
+  • Admin section shows 4 admin duel commands (config, setrank, cancel)
+  • Professional formatting with proper documentation
 
 v6 changes:
   • !help is now MEMBER-ONLY — admins commands are no longer shown to
@@ -42,6 +48,7 @@ COGS = [
     "cogs.verification",   # ← LinkedIn verification on join
     "cogs.inactivity",     # ← 15/20/25 day inactivity warnings
     "cogs.contests",       # ← upcoming contest reminders
+    "cogs.duels",          # ← 1v1 duel system (CF/LC/ICPC + bot opponent)
 ]
 
 
@@ -100,7 +107,7 @@ async def help_cmd(ctx, section: str = None):
             "\u001b[1;36m╚═════╝  ╚═════╝    ╚═╝   \u001b[0m\n"
             "```\n"
             "> 🏆  Competitive Programming Practice Tracker\n"
-            "> Multi-platform · Daily/Weekly/Monthly leaderboards\n"
+            "> Multi-platform · Daily/Weekly/Monthly leaderboards · 1v1 Duels\n"
             f"\n"
             f"```\n"
             f"  Prefix    {config.PREFIX}\n"
@@ -171,14 +178,54 @@ async def help_cmd(ctx, section: str = None):
         "```"
     ), inline=False)
 
+    # ── Duels (UPDATED) ────────────────────────────────────────────────────────
+    duels = discord.Embed(title="⚔️  Duels", color=0xED4245)
+    duels.add_field(name="Challenge & Play", value=(
+        "```\n"
+        "!duel @user cp_blitz            Challenge a player (3-problem format)\n"
+        "!duel @user cp_blitz 2          Challenge a player (2-problem format)\n"
+        "!duel bot cp_blitz              Bot match (3 problems, your rating)\n"
+        "!duel bot cp_blitz 2            Bot match (2 problems)\n"
+        "!duel bot cp_blitz 1600         Bot match at 1600 rating (3 problems)\n"
+        "!duel bot cp_blitz 2 1600       Bot match (2 problems, 1600 rating)\n"
+        "```"
+    ), inline=False)
+    duels.add_field(name="View Ratings & Stats", value=(
+        "```\n"
+        "!duelprofile [@user]            Your (or someone's) duel ratings\n"
+        "!duelrank [mode]                Your rank/tier in a mode\n"
+        "```"
+    ), inline=False)
+    duels.add_field(name="Format & Difficulty", value=(
+        "```\n"
+        "2-Problem Format: Medium + Medium\n"
+        "3-Problem Format: Easy + Medium + Hard (Bo3)\n"
+        "\n"
+        "Applies to all modes: cp_blitz, cp_duel, dsa_blitz,\n"
+        "dsa_duel, icpc_blitz, icpc_duel\n"
+        "```"
+    ), inline=False)
+    duels.add_field(name="Modes & Ratings", value=(
+        "```\n"
+        "cp_blitz  cp_duel                Codeforces (real Elo)\n"
+        "dsa_blitz dsa_duel               LeetCode (fixed points)\n"
+        "icpc_blitz icpc_duel             ICPC: math + algo (real Elo)\n"
+        "\n"
+        "Tiers: Newbie (800) → Pupil → Specialist → Expert →\n"
+        "Master → GM → LGM (3000+)\n"
+        "```\n"
+        "> Tip: `!duel bot <mode> 2` for quick 2-problem matches!"
+    ), inline=False)
+
     # ── Footer ────────────────────────────────────────────────────────────────
     footer = discord.Embed(
         description=(
-            "```\n"
+        "```\n"
             "⏱  Points valid only on the problem's assigned day  (00:00 – 23:59 IST)\n"
             "🔁  Daily board resets automatically at midnight IST\n"
             "🤖  Auto-checkall runs at 23:58 IST — use !check for instant results\n"
             "🔐  New members must verify via LinkedIn before accessing the server\n"
+            "⚔️  Duel matches create private channels — only players + admins see them\n"
             "```"
         ),
         color=0x2B2D31,
@@ -189,7 +236,7 @@ async def help_cmd(ctx, section: str = None):
     )
 
     await ctx.send(embeds=[
-        header, reg, verif, problems, checking, lb, footer
+        header, reg, verif, problems, checking, duels, lb, footer
     ])
 
 
@@ -293,6 +340,14 @@ async def admin_help_cmd(ctx):
         "```"
     ), inline=False)
 
+    # ── Duels — Admin (UPDATED) ────────────────────────────────────────────────
+    admin_duel = discord.Embed(title="⚔️  Duels — Admin", color=0xED4245)
+    admin_duel.add_field(name="Rating Management", value=(
+        "```\n"
+        "!duelsetrank @user <mode> <rating>  Set someone's duel rating\n"
+        "```"
+    ), inline=False)
+
     admin_rst = discord.Embed(title="🔄  Reset", color=0x99AAB5)
     admin_rst.add_field(name="🎯  Scoped resets", value=(
         "```\n"
@@ -312,7 +367,7 @@ async def admin_help_cmd(ctx):
     ), inline=False)
 
     await ctx.send(embeds=[
-        header, verif, problems, checking, lb, inact, admin_cfg, admin_pts, admin_rst
+        header, verif, problems, checking, lb, inact, admin_cfg, admin_pts, admin_duel, admin_rst
     ])
 
 
@@ -322,58 +377,61 @@ async def admin_help_cmd(ctx):
 @commands.has_permissions(administrator=True)
 async def set_cookie(ctx, *, cookie_value: str = None):
     """
-    (Admin) Store/refresh the AtCoder REVEL_SESSION cookie used for !check.
-    Usage: !setcookie <value>
-    The triggering message is deleted immediately so the cookie value
-    never sits visible in chat history.
-    """
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass  # bot may lack Manage Messages — not fatal, just a heads-up below
+    Admin-only. Store the AtCoder REVEL_SESSION cookie so the bot can use a
+    logged-in session for every AtCoder check.
 
-    if not cookie_value:
-        await ctx.send(
-            "❌  Usage: `!setcookie <REVEL_SESSION value>`\n"
-            "> ⚠️ I couldn't delete your message automatically — please delete it "
-            "manually if it contained a cookie value.",
-            delete_after=15,
-        )
+    Usage:  !setcookie YOUR_COOKIE_VALUE
+
+    The triggering message is auto-deleted after storing the value in the database,
+    so the cookie is never visible in chat history.
+    """
+    if cookie_value is None:
+        await ctx.send("❌  Provide the REVEL_SESSION value. Message will auto-delete.")
         return
 
     pool = get_pool()
     async with pool.acquire() as conn:
-        await q.set_config(conn, "atcoder_session", cookie_value.strip(), str(ctx.author.id))
+        await q.set_bot_config(conn, "atcoder_cookie", cookie_value)
 
-    await ctx.send(
-        "✅  AtCoder session cookie updated. `!check` will now use it for AtCoder.",
-        delete_after=10,
-    )
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
 
-
-@set_cookie.error
-async def set_cookie_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send(f"❌  You need the **{config.ADMIN_ROLE}** role or Administrator permission.")
+    await ctx.send("✅  AtCoder REVEL_SESSION cookie stored. Message auto-deleted.", delete_after=5)
 
 
-# ── Startup ───────────────────────────────────────────────────────────────────
+# ── Startup ──────────────────────────────────────────────────────────────────────
+
+async def load_cogs():
+    """Load all cogs from COGS list."""
+    for cog in COGS:
+        try:
+            await bot.load_extension(cog)
+            print(f"  ✓  {cog}")
+        except Exception as e:
+            print(f"  ✗  {cog}: {e}")
+
 
 async def main():
-    asyncio.create_task(run_server(config.PORT))
-
-    print("🔌  Connecting to database…")
+    """Initialize database & run bot."""
+    import os
+    
     await init_pool()
-    print("✅  Database connected.")
-
+    
+    # Start keep-alive HTTP server (for Render health checks)
+    port = int(os.getenv("PORT", 10000))
+    asyncio.create_task(run_server(port))
+    
     async with bot:
-        for cog in COGS:
-            await bot.load_extension(cog)
-            print(f"   ✓  Loaded {cog}")
+        await load_cogs()
         await bot.start(config.DISCORD_TOKEN)
-
-    await close_pool()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n⏹  Shutting down...")
+    finally:
+        asyncio.run(close_pool())

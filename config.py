@@ -1,6 +1,6 @@
 """
 config.py — All environment variables and bot-wide constants.
-v4: Added contest reminder config. Removed clist.by dependency.
+v5: Added duel mode channel routing for dedicated duel spaces.
 """
 
 import os
@@ -40,6 +40,7 @@ COLOR_INFO    = 0x5865F2   # blurple
 COLOR_WARN    = 0xFEE75C   # yellow
 COLOR_GOLD    = 0xFFD700   # gold
 COLOR_PURPLE  = 0x9B59B6   # purple (monthly)
+COLOR_CYAN    = 0x00D9FF   # cyan (duel ranks)
 
 # ── Verification system (cogs/verification.py) ────────────────────────────────
 VERIFICATION_CHANNEL   = os.getenv("VERIFICATION_CHANNEL",  "verification")
@@ -60,3 +61,28 @@ CHECKALL_CHANNEL_ID: int | None = int(_checkall_ch) if _checkall_ch.isdigit() el
 CONTEST_REMINDER_CHANNEL = os.getenv("CONTEST_REMINDER_CHANNEL", "contest-reminder")
 # Role to ping — "everyone" for @everyone, exact role name like "Member", or "" for no ping
 CONTEST_REMINDER_ROLE    = os.getenv("CONTEST_REMINDER_ROLE",    "everyone")
+
+# ── Duel system channel routing ────────────────────────────────────────────────
+# Each mode gets its own parent category/channel for match rooms.
+# Format: DUEL_<MODE>_CHANNEL = channel ID (int) or channel name (str).
+# If not set, matches can be created in any channel where the command is run.
+# Recommended setup:
+#   - Create a "Duels" category with subcategories: CP, DSA, ICPC
+#   - Create channels: cp-duels, cp-blitz, dsa-duels, dsa-blitz, icpc-duels, icpc-blitz
+#   - Set these env vars to those channel IDs
+DUEL_CP_DUEL_CHANNEL   = os.getenv("DUEL_CP_DUEL_CHANNEL", "")     # CP Duel matches
+DUEL_CP_BLITZ_CHANNEL  = os.getenv("DUEL_CP_BLITZ_CHANNEL", "")    # CP Blitz matches
+DUEL_DSA_DUEL_CHANNEL  = os.getenv("DUEL_DSA_DUEL_CHANNEL", "")    # DSA (LC) Duel matches
+DUEL_DSA_BLITZ_CHANNEL = os.getenv("DUEL_DSA_BLITZ_CHANNEL", "")   # DSA (LC) Blitz matches
+DUEL_ICPC_DUEL_CHANNEL = os.getenv("DUEL_ICPC_DUEL_CHANNEL", "")   # ICPC Duel matches
+DUEL_ICPC_BLITZ_CHANNEL= os.getenv("DUEL_ICPC_BLITZ_CHANNEL", "")  # ICPC Blitz matches
+
+# Map mode → channel ID for easy lookup
+DUEL_MODE_CHANNELS = {
+    "cp_duel":    DUEL_CP_DUEL_CHANNEL,
+    "cp_blitz":   DUEL_CP_BLITZ_CHANNEL,
+    "dsa_duel":   DUEL_DSA_DUEL_CHANNEL,
+    "dsa_blitz":  DUEL_DSA_BLITZ_CHANNEL,
+    "icpc_duel":  DUEL_ICPC_DUEL_CHANNEL,
+    "icpc_blitz": DUEL_ICPC_BLITZ_CHANNEL,
+}

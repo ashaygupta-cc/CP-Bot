@@ -2,9 +2,11 @@ services:
   - type: web
     name: cp-discord-bot
     runtime: python
+    pythonVersion: 3.14
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     healthCheckPath: /health
+    healthCheckProtocol: http
     envVars:
       - key: DISCORD_TOKEN
         sync: false
