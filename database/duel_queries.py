@@ -64,6 +64,11 @@ async def set_duel_config(conn, guild_id: str, key: str, value: str, updated_by:
 
 async def get_or_create_rating(conn, discord_id: str, guild_id: str, mode: str, default: int = 800) -> dict:
     """Get or create a duel rating for a player. Default rating is 800 (Newbie)."""
+    if not discord_id:
+        return {"discord_id": "", "guild_id": guild_id, "mode": mode, "rating": default, "wins": 0, "losses": 0, "draws": 0}
+    discord_id = str(discord_id)
+    await ensure_user_exists(conn, discord_id)
+
     row = await conn.fetchrow(
         "SELECT * FROM duel_ratings WHERE discord_id=$1 AND guild_id=$2 AND mode=$3",
         discord_id, guild_id, mode,
@@ -159,6 +164,10 @@ async def create_duel(
     player2_id: str | None, is_bot_match: bool, bot_rating: int | None,
     total_games: int, duel_number: int | None = None,
 ) -> int:
+    await ensure_user_exists(conn, player1_id)
+    if player2_id and not is_bot_match:
+        await ensure_user_exists(conn, player2_id)
+
     return await conn.fetchval(
         """
         INSERT INTO duels (guild_id, mode, player1_id, player2_id, is_bot_match,

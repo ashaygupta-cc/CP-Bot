@@ -96,3 +96,49 @@ DUEL_MODE_CHANNELS = {
     "icpc_duel":  DUEL_ICPC_DUEL_CHANNEL,
     "icpc_blitz": DUEL_ICPC_BLITZ_CHANNEL,
 }
+
+# ── Website integration (Phase 1) ───────────────────────────────────────────
+# The REST API in api_server.py has no Discord context, so the guild it should
+# report on must come from the environment. Right-click the server in Discord
+# with Developer Mode enabled → Copy Server ID.
+GUILD_ID = os.getenv("GUILD_ID", "")
+
+# Shared secret between this bot and the website backend. Only /api/internal/*
+# routes require it; public read routes do not. Generate with:
+#   openssl rand -hex 32
+BB_API_KEY = os.getenv("BB_API_KEY", "")
+
+# Browser origins allowed to call the API directly. The website normally goes
+# through its own server-side proxy, so this mainly covers local development.
+BB_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv(
+        "BB_ALLOWED_ORIGINS",
+        "http://localhost:5173,http://localhost:4000",
+    ).split(",")
+    if o.strip()
+]
+
+
+# ── Website channel sync (Phase 2) ──────────────────────────────────────────
+# Channels mirrored into Postgres for the website. Anything NOT listed here is
+# never stored — ordinary server chat stays in Discord only.
+#
+# The key is what the website asks for (/api/channels/server_updates), so
+# channel ids can change without touching frontend code.
+SYNCED_CHANNELS = {
+    "1437074829235982356": "contest_reminder",
+    "1453501768179650570": "server_updates",
+    "1453499579583565969": "updates_official",
+    "1456216598846378057": "competitions_info",
+    "1433862332534096105": "ideas_feedback",
+    "1518192178520657981": "self_promo",
+    "1524890934095904920": "arena_guide",
+    "1518900916021887046": "maths_lounge",
+    "1526145287993688104": "cp_dsa_roadmap",
+    "1520284027008061562": "daily_editorials",
+    "1453508409864486912": "server_info",
+    "1433864900484009985": "team_info",
+    "1453507423125110815": "find_us_online",
+    "1526149678796898305": "oa_questions",
+}

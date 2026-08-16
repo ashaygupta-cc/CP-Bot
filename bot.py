@@ -24,11 +24,13 @@ v6 changes:
 import asyncio
 import discord
 from discord.ext import commands
-
+from api_server import run_server
 import config
 from database.connection import init_pool, close_pool, get_pool
 from database import queries as q
-from keep_alive import run_server
+# Serves /health plus the read-only REST API the website consumes.
+# keep_alive.py is kept as a fallback: swap this import back to revert.
+from api_server import run_server
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -91,6 +93,7 @@ COGS = [
     "cogs.inactivity",     # ← 15/20/25 day inactivity warnings
     "cogs.contests",       # ← upcoming contest reminders
     "cogs.duels",          # ← 1v1 duel system (CF/LC/ICPC + bot opponent)
+    "cogs.website_sync",   # ← mirrors configured channels into PG for the website
 ]
 
 
@@ -395,8 +398,20 @@ async def admin_help_cmd(ctx):
         "```"
     ), inline=False)
 
+    admin_sync = discord.Embed(title="🌐  Website Sync — Admin", color=0x5865F2)
+    admin_sync.add_field(name="\u200b", value=(
+        "```\n"
+        "!syncultimate           Sync complete history across all channels\n"
+        "!syncall                Sync last 10 messages across all channels\n"
+        "!sync <key>             Sync last 10 messages of a specific channel\n"
+        "!syncchannel <key> [n]  Sync custom number of messages of a channel\n"
+        "!syncstatus             View row counts and last sync timestamps\n"
+        "```\n"
+        "> **Note:** Bot automatically syncs the last 10 messages in background every hour."
+    ), inline=False)
+
     await ctx.send(embeds=[
-        header, verif, problems, checking, lb, inact, admin_cfg, admin_pts, admin_duel, admin_rst
+        header, verif, problems, checking, lb, inact, admin_cfg, admin_pts, admin_duel, admin_sync, admin_rst
     ])
 
 
@@ -436,6 +451,8 @@ async def load_cogs():
     """Load all cogs from COGS list."""
     for cog in COGS:
         try:
+            if cog in bot.extensions:
+                continue
             await bot.load_extension(cog)
             print(f"  ✓  {cog}")
         except Exception as e:
@@ -443,24 +460,83 @@ async def load_cogs():
 
 
 async def main():
-    """Initialize database & run bot."""
+    """Initialize database, run web server immediately, apply async startup delay, & run bot with retry."""
     import os
-    
+    import sys
+    import aiohttp
+
+    # 1. Initialize DB pool
     await init_pool()
-    
-    # Start keep-alive HTTP server (for Render health checks)
+
+    # 2. Start API/health web server immediately so Render port checks pass
     port = int(os.getenv("PORT", 10000))
-    asyncio.create_task(run_server(port))
-    
-    async with bot:
-        await load_cogs()
-        await bot.start(config.DISCORD_TOKEN)
+    asyncio.create_task(run_server(port, bot))
+
+    # 3. Apply the startup delay asynchronously if set, letting web server handle port scans
+    _delay = int(os.environ.get("BOT_STARTUP_DELAY", "45"))
+    if os.environ.get("BOT_RESTARTED") == "1":
+        # If the bot was restarted internally, we don't need the full startup cooldown again,
+        # because we already slept before restarting. Keep a small 5s safety delay.
+        _delay = min(_delay, 5)
+
+    if _delay > 0:
+        print(f"⏳  Startup cooldown: {_delay}s (set BOT_STARTUP_DELAY to change)...", flush=True)
+        await asyncio.sleep(_delay)
+
+    # 4. Start bot with restart retry for rate limits (429/1015) and connection errors
+    retry_delay = int(os.environ.get("BOT_RETRY_DELAY", "60"))
+    try:
+        print("🚀  Starting Discord bot connection...", flush=True)
+        async with bot:
+            await load_cogs()
+            await bot.start(config.DISCORD_TOKEN)
+    except discord.LoginFailure as e:
+        print("❌  LoginFailure: Invalid Discord token configured. Exiting.", flush=True)
+        raise e
+    except discord.HTTPException as e:
+        if e.status == 429:
+            print(f"⚠️  [DISCORD_RATE_LIMIT] Rate limited (429/1015). Sleeping {retry_delay}s and restarting process...", flush=True)
+        else:
+            print(f"⚠️  [DISCORD_HTTP_ERROR] HTTP error ({e.status}): {e}. Sleeping {retry_delay}s and restarting process...", flush=True)
+        await asyncio.sleep(retry_delay)
+        os.environ["BOT_RETRY_DELAY"] = str(min(retry_delay * 2, 600))
+        os.environ["BOT_RESTARTED"] = "1"
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except (aiohttp.ClientConnectorError, ConnectionError, asyncio.TimeoutError) as e:
+        print(f"⚠️  [CONNECTION_ERROR] Network connection issue: {e}. Sleeping {retry_delay}s and restarting process...", flush=True)
+        await asyncio.sleep(retry_delay)
+        os.environ["BOT_RETRY_DELAY"] = str(min(retry_delay * 2, 600))
+        os.environ["BOT_RESTARTED"] = "1"
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        err_str = str(e).lower()
+        if "connector" in err_str or "connection" in err_str or "timeout" in err_str or "socket" in err_str:
+            print(f"⚠️  [CONNECTION_ERROR] Network connection issue: {e}. Sleeping {retry_delay}s and restarting process...", flush=True)
+            await asyncio.sleep(retry_delay)
+            os.environ["BOT_RETRY_DELAY"] = str(min(retry_delay * 2, 600))
+            os.environ["BOT_RESTARTED"] = "1"
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        else:
+            print(f"❌  Unexpected exception during bot execution:\n{tb}", flush=True)
+            raise e
 
 
 if __name__ == "__main__":
+    import sys
+    
+    # Avoid UnicodeEncodeError on Windows consoles when printing emojis
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n⏹  Shutting down...")
-    finally:
-        asyncio.run(close_pool())
+    except Exception as e:
+        print(f"\n❌  Fatal error outside loop: {type(e).__name__}: {e}", flush=True)
+        sys.exit(1)

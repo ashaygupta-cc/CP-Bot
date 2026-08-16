@@ -1,1 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Env files — never commit these
 .env
+.env.*
+!.env.example
+
+.DS_Store
+*.log

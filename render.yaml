@@ -22,3 +22,9 @@ services:
         value: "Admin"
       - key: PORT
         value: "10000"
+      - key: GUILD_ID
+        sync: false # Discord server ID the website reads stats for
+      - key: BB_API_KEY
+        sync: false # must match BB_API_KEY on the website backend
+      - key: BB_ALLOWED_ORIGINS
+        sync: false # comma-separated browser origins, e.g. https://your-site.vercel.app
