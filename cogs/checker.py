@@ -59,6 +59,24 @@ except ImportError:
 
 IST = q.IST
 
+# Same fixed display order used by !problems, so !check / !checkall always
+# list problems in the identical sequence the user already sees there.
+DIFF_ORDER = {"easy": 0, "medium": 1, "hard": 2, "expert": 3, "master": 4}
+
+
+def _difficulty_sort_key(prob):
+    return (DIFF_ORDER.get(prob["difficulty"], 99), prob["id"])
+
+
+def _sorted_probs(probs: list) -> list:
+    return sorted(probs, key=_difficulty_sort_key)
+
+
+def _line(i: int, platform: str, pid: str, status: str) -> str:
+    """One clean, numbered result line — no emoji, matches !problems formatting."""
+    return f"`{i}.`  **{platform.upper()} {pid}**  —  {status}"
+
+
 # ── Rate-limit constants ───────────────────────────────────────────────────────
 MAX_CHECKS_PER_DAY  = 3
 COOLDOWN_SECONDS    = 60 * 60   # 1 h between !check runs
@@ -105,13 +123,13 @@ class Checker(commands.Cog):
             remaining = state["cooldown_until"] - now
             mins = int(remaining.total_seconds() // 60) + 1
             return False, (
-                f"⏳  Please wait **{mins} min** before running `!check` again "
+                f"Please wait **{mins} min** before running `!check` again "
                 f"(1 h cooldown — keeps us from getting rate-limited)."
             )
 
         if state["count"] >= MAX_CHECKS_PER_DAY:
             return False, (
-                f"🚫  You've used all **{MAX_CHECKS_PER_DAY}** `!check` runs for today. "
+                f"You've used all **{MAX_CHECKS_PER_DAY}** `!check` runs for today. "
                 "Resets at midnight IST."
             )
 
@@ -157,23 +175,23 @@ class Checker(commands.Cog):
         async with pool.acquire() as conn:
             week = await q.get_active_week(conn, str(ctx.guild.id))
             if not week:
-                await ctx.send("❌  No active week. Admin: `!setweek`")
+                await ctx.send("No active week. Admin: `!setweek`")
                 return
-            probs = await q.get_problems_for_day(conn, str(ctx.guild.id), today)
+            probs = _sorted_probs(await q.get_problems_for_day(conn, str(ctx.guild.id), today))
 
         if not probs:
             async with pool.acquire() as conn:
                 all_probs = await q.get_problems_for_week(conn, str(ctx.guild.id), week["id"])
             if all_probs:
                 await ctx.send(
-                    f"📭  No problems assigned for today (`{today}`).\n"
+                    f"No problems assigned for today (`{today}`).\n"
                     "Use `!problems` to see the full week schedule."
                 )
             else:
-                await ctx.send("📭  No problems assigned this week yet.")
+                await ctx.send("No problems assigned this week yet.")
             return
 
-        msg = await ctx.send(f"🔍  Checking **{target.display_name}**'s submissions for today…")
+        msg = await ctx.send(f"Checking **{target.display_name}**'s submissions for today…")
         self._record_check_use(ctx.author.id)
 
         try:
@@ -182,21 +200,21 @@ class Checker(commands.Cog):
             )
         except Exception as e:
             print(f"[check] _check_member crashed for {target.id}: {e}")
-            await msg.edit(content=f"⚠️  An error occurred while checking: `{e}`")
+            await msg.edit(content=f"An error occurred while checking: `{e}`")
             return
 
-        results = [r if r is not None else "⚠️  Unknown error." for r in results]
+        results = [r if r is not None else "Unknown error." for r in results]
 
         color = COLOR_SUCCESS if total_earned > 0 else COLOR_INFO
         embed = discord.Embed(
-            title=f"🔍  Solve Check  —  {target.display_name}",
+            title=f"Solve Check  ·  {target.display_name}",
             description="\n".join(results),
             color=color,
         )
         embed.set_thumbnail(url=target.display_avatar.url)
-        embed.add_field(name="📅  Date",          value=f"`{today}`",                                    inline=True)
-        embed.add_field(name="🏅  Points Earned", value=f"**+{total_earned} pts**" if total_earned > 0
-                                                         else "No new points",                            inline=True)
+        embed.add_field(name="Date",          value=f"`{today}`",                                    inline=True)
+        embed.add_field(name="Points Earned", value=f"**+{total_earned} pts**" if total_earned > 0
+                                                       else "No new points",                            inline=True)
         remaining = MAX_CHECKS_PER_DAY - self._check_state[ctx.author.id]["count"]
         embed.set_footer(
             text=f"Week: {week['label']}  ·  Points valid 00:00–23:59 IST only  ·  "
@@ -216,20 +234,20 @@ class Checker(commands.Cog):
         async with pool.acquire() as conn:
             week  = await q.get_active_week(conn, str(ctx.guild.id))
             if not week:
-                await ctx.send("❌  No active week.")
+                await ctx.send("No active week.")
                 return
-            probs = await q.get_problems_for_day(conn, str(ctx.guild.id), today)
+            probs = _sorted_probs(await q.get_problems_for_day(conn, str(ctx.guild.id), today))
             # NOTE: `handles` has no guild_id column (it's not guild-scoped) —
             # we pull every registered handle and filter to this guild's
             # members afterward via guild.get_member().
             users = await conn.fetch("SELECT DISTINCT discord_id FROM handles")
 
         if not probs:
-            await ctx.send(f"📭  No problems for today (`{today}`).")
+            await ctx.send(f"No problems for today (`{today}`).")
             return
 
         msg = await ctx.send(
-            f"⏳  Checking **{len(users)}** member(s) across "
+            f"Checking **{len(users)}** member(s) across "
             f"**{len(probs)}** problem(s) for `{today}`…  *(~{len(users) * 2}s)*"
         )
 
@@ -238,7 +256,7 @@ class Checker(commands.Cog):
         )
 
         embed = discord.Embed(
-            title=f"📊  Bulk Check  —  {today}",
+            title=f"Bulk Check  ·  {today}",
             description="\n".join(summary) or "No registered members found.",
             color=COLOR_INFO,
         )
@@ -248,7 +266,7 @@ class Checker(commands.Cog):
     @check_all.error
     async def check_all_error(self, ctx, error):
         if isinstance(error, commands.MissingPermissions):
-            await ctx.send(f"❌  You need the **{ADMIN_ROLE}** role or Administrator permission.")
+            await ctx.send(f"You need the **{ADMIN_ROLE}** role or Administrator permission.")
 
     # ── Core: check one member ────────────────────────────────────────────────
 
@@ -270,6 +288,11 @@ class Checker(commands.Cog):
         pool         = get_pool()
         now_utc      = datetime.now(timezone.utc)
 
+        # v2.2: fetch active month once so we can pass month_id to record_solve
+        async with pool.acquire() as conn:
+            month    = await q.get_active_month(conn, guild_id)
+            month_id = month["id"] if month else None
+
         api_groups: dict[str, list[tuple[int, dict]]] = {}
 
         # ── Fast local pre-checks (no network) ───────────────────────────────
@@ -284,9 +307,9 @@ class Checker(commands.Cog):
             day_start_utc, day_end_utc = _day_window(assigned_date)
 
             if now_utc > day_end_utc:
-                results[idx] = (
-                    f"🔒  `{platform.upper()} {pid}` — "
-                    f"Day ended (`{assigned_date}`). No points awarded."
+                results[idx] = _line(
+                    idx + 1, platform, pid,
+                    f"Day ended (`{assigned_date}`) — no points awarded",
                 )
                 continue
 
@@ -294,20 +317,20 @@ class Checker(commands.Cog):
                 already = await q.has_solved(conn, str(member.id), prob_id)
 
             if already:
-                results[idx] = f"✅  `{platform.upper()} {pid}` — Already recorded (+{pts} pts)"
+                results[idx] = _line(idx + 1, platform, pid, f"Already recorded  ·  +{pts} pts")
                 continue
 
             if not adapter:
-                results[idx] = f"⚠️  `{platform.upper()} {pid}` — Platform adapter unavailable."
+                results[idx] = _line(idx + 1, platform, pid, "Platform adapter unavailable")
                 continue
 
             async with pool.acquire() as conn:
                 handle = await q.get_handle(conn, str(member.id), platform)
 
             if not handle:
-                results[idx] = (
-                    f"⚠️  `{platform.upper()} {pid}` — "
-                    f"No {adapter.NAME} handle. `!register {platform} <handle>`"
+                results[idx] = _line(
+                    idx + 1, platform, pid,
+                    f"No {adapter.NAME} handle linked  ·  `!register {platform} <handle>`",
                 )
                 continue
 
@@ -327,9 +350,9 @@ class Checker(commands.Cog):
 
             if not handle:
                 for idx, prob in items:
-                    results[idx] = (
-                        f"⚠️  `{platform.upper()} {prob['problem_id']}` — "
-                        f"No {adapter.NAME} handle."
+                    results[idx] = _line(
+                        idx + 1, platform, prob["problem_id"],
+                        f"No {adapter.NAME} handle linked",
                     )
                 return 0
 
@@ -343,10 +366,9 @@ class Checker(commands.Cog):
                 except Exception as e:
                     print(f"[checker] CF bulk fetch failed for {handle}: {e}")
                     for idx, prob in items:
-                        results[idx] = (
-                            f"⚠️  `CF {prob['problem_id']}` — Codeforces is "
-                            f"temporarily unavailable (rate-limited/blocked). "
-                            f"Try `!check` again in a few minutes."
+                        results[idx] = _line(
+                            idx + 1, platform, prob["problem_id"],
+                            "Codeforces temporarily unavailable — try `!check` again shortly",
                         )
                     return 0
 
@@ -364,11 +386,12 @@ class Checker(commands.Cog):
                         )
                     except Exception as e:
                         print(f"[checker] cf / {pid} local-filter error for {handle}: {e}")
-                        results[idx] = f"⚠️  `CF {pid}` — error: `{e}`"
+                        results[idx] = _line(idx + 1, platform, pid, f"Error: `{e}`")
                         continue
 
                     earned += await self._apply_result(
-                        results, idx, member, prob_id, pid, pts, platform, solved, status, pool, guild_id
+                        results, idx, member, prob_id, pid, pts, platform, solved, status, pool, guild_id,
+                        month_id=month_id,   # v2.2
                     )
 
                 return earned
@@ -391,12 +414,13 @@ class Checker(commands.Cog):
                     )
 
                     earned += await self._apply_result(
-                        results, idx, member, prob_id, pid, pts, platform, solved, status, pool, guild_id
+                        results, idx, member, prob_id, pid, pts, platform, solved, status, pool, guild_id,
+                        month_id=month_id,   # v2.2
                     )
 
                 except Exception as e:
                     print(f"[checker] {platform} / {pid} error for {handle}: {e}")
-                    results[idx] = f"⚠️  `{platform.upper()} {pid}` — API error: `{e}`"
+                    results[idx] = _line(idx + 1, platform, pid, f"API error: `{e}`")
 
             return earned
 
@@ -407,10 +431,13 @@ class Checker(commands.Cog):
         return results, total_earned
 
     async def _apply_result(
-        self, results, idx, member, prob_id, pid, pts, platform, solved, status, pool, guild_id
+        self, results, idx, member, prob_id, pid, pts, platform, solved, status, pool, guild_id,
+        month_id=None,   # v2.2: passed through so monthly_solves gets populated
     ) -> int:
         """Shared "award + format result line" logic for both CF (local-filter) and
-        per-problem (network) check paths, so the two stay in sync."""
+        per-problem (network) check paths, so the two stay in sync.
+        `idx` is the position in the (already-sorted) probs list, so the
+        rendered line lands in the same row !problems would show it in."""
         if solved:
             async with pool.acquire() as conn:
                 newly = await q.record_solve(
@@ -420,15 +447,17 @@ class Checker(commands.Cog):
                     guild_id      = guild_id,
                     solved_at     = datetime.now(timezone.utc),
                     points        = pts,
+                    month_id      = month_id,   # v2.2: mirrors solve into monthly_solves
                 )
             if newly:
-                results[idx] = f"✅  `{platform.upper()} {pid}` — **Solved! +{pts} pts** 🎉"
+                results[idx] = _line(idx + 1, platform, pid, f"Solved  ·  +{pts} pts")
                 return pts
             else:
-                results[idx] = f"✅  `{platform.upper()} {pid}` — Already recorded."
+                results[idx] = _line(idx + 1, platform, pid, "Already recorded")
                 return 0
         else:
-            results[idx] = f"❌  `{platform.upper()} {pid}` — {status.replace('❌ ', '')}"
+            clean_status = status.replace("❌ ", "").replace("⚠️ ", "").strip()
+            results[idx] = _line(idx + 1, platform, pid, clean_status)
             return 0
 
     # ── Core: bulk-check all members in a guild ───────────────────────────────
@@ -472,14 +501,14 @@ class Checker(commands.Cog):
                 )
             except Exception as e:
                 print(f"[bulk_check] _check_member error for {member.id}: {e}")
-                summary.append(f"**{member.display_name}**  ⚠️ error: `{e}`")
+                summary.append(f"**{member.display_name}**  —  error: `{e}`")
                 continue
 
             total += earned
-            results      = [r if r is not None else "⚠️ error" for r in results]
+            results      = [r if r is not None else "error" for r in results]
             solved_count = sum(1 for r in results if "Solved" in r or "Already" in r)
             badge        = f"**+{earned} pts**" if earned else "—"
-            summary.append(f"**{member.display_name}**  {badge}  `{solved_count}/{len(probs)}`")
+            summary.append(f"**{member.display_name}**  {badge}  ·  `{solved_count}/{len(probs)}`")
 
         return summary, total
 
@@ -496,7 +525,7 @@ class Checker(commands.Cog):
                     week  = await q.get_active_week(conn, str(guild.id))
                     if not week:
                         continue
-                    probs = await q.get_problems_for_day(conn, str(guild.id), today)
+                    probs = _sorted_probs(await q.get_problems_for_day(conn, str(guild.id), today))
                 if probs:
                     await self._bulk_check_guild(guild, probs, str(guild.id))
             except Exception as e:
@@ -534,7 +563,7 @@ class Checker(commands.Cog):
                         week  = await q.get_active_week(conn, str(guild.id))
                         if not week:
                             continue
-                        probs = await q.get_problems_for_day(conn, str(guild.id), today)
+                        probs = _sorted_probs(await q.get_problems_for_day(conn, str(guild.id), today))
 
                     if not probs:
                         print(f"[night_check] Guild {guild.id}: no problems today, skipping.")
@@ -550,7 +579,7 @@ class Checker(commands.Cog):
                         channel = guild.get_channel(CHECKALL_CHANNEL_ID)
                         if channel:
                             embed = discord.Embed(
-                                title=f"🌙  Nightly Auto-Check  —  {today}",
+                                title=f"Nightly Auto-Check  ·  {today}",
                                 description="\n".join(summary) or "No members found.",
                                 color=COLOR_INFO,
                             )

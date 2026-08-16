@@ -41,6 +41,7 @@ COGS = [
     "cogs.points",
     "cogs.verification",   # ← LinkedIn verification on join
     "cogs.inactivity",     # ← 15/20/25 day inactivity warnings
+    "cogs.contests",       # ← upcoming contest reminders
 ]
 
 

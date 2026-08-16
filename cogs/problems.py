@@ -226,13 +226,19 @@ class Problems(commands.Cog):
         todays_probs = sorted(todays_probs, key=_difficulty_sort_key)
 
         # Work out where today sits in the week
-        days_into_week = (today - week["start_date"]).days + 1
-        days_in_week   = (week["end_date"] - week["start_date"]).days + 1
-        week_progress  = f"Day {days_into_week} of {days_in_week}"
+        # Use day_number_display() to clamp so we never show "Day 8 of 7"
+        days_into_week, days_in_week = q.day_number_display(
+            week["start_date"], week["end_date"], today
+        )
+        week_done     = today > week["end_date"]
+        day_label     = f"Day {days_into_week} of {days_in_week}"
+        week_progress = day_label + (" — ✅ Week complete" if week_done else "")
 
         # Day window times for display (IST)
-        day_start_ist = f"{today.strftime('%d %b %Y')}  00:00 IST"
-        day_end_ist   = f"{today.strftime('%d %b %Y')}  23:59 IST"
+        # If week is already over, show the last valid day's window, not today's
+        display_date  = min(today, week["end_date"])
+        day_start_ist = f"{display_date.strftime('%d %b %Y')}  00:00 IST"
+        day_end_ist   = f"{display_date.strftime('%d %b %Y')}  23:59 IST"
 
         embed = discord.Embed(
             title=f"📋  {week['label']}  —  {week_progress}  —  {today.isoformat()}",

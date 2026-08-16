@@ -107,43 +107,10 @@ class VerificationView(discord.ui.View):
             )
             return
 
-        clicked_at = _follow_clicked_at.get(member.id)
+        # Verification gate disabled — grant access immediately, no follow
+        # click or cooldown required.
 
-        # Never clicked "Follow on LinkedIn"
-        if clicked_at is None:
-            await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="Visit LinkedIn first",
-                    description=(
-                        "Click **Follow on LinkedIn** and follow our page before confirming."
-                    ),
-                    color=COLOR_ERROR,
-                ),
-                ephemeral=True,
-            )
-            return
-
-        # Silent simulation gate — user clicked too fast, meaning they likely
-        # never visited the LinkedIn page. Don't reveal the timer; just prompt
-        # them to actually follow first. Legitimate followers who spent time
-        # on the page will naturally pass this check on their next click.
-        elapsed = time.monotonic() - clicked_at
-        if elapsed < FOLLOW_COOLDOWN:
-            await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="One more step",
-                    description=(
-                        f"Please visit and **follow** our LinkedIn page first:\n"
-                        f"[Open LinkedIn page]({LINKEDIN_URL})\n\n"
-                        f"Once you've followed, come back and click **I Have Followed**."
-                    ),
-                    color=COLOR_WARN,
-                ),
-                ephemeral=True,
-            )
-            return
-
-        # -- All checks passed — grant access ----------------------------------
+        # -- Grant access ---------------------------------------------------
         try:
             if verif_role and verif_role in member.roles:
                 await member.remove_roles(verif_role, reason="Completed LinkedIn verification")
@@ -214,20 +181,32 @@ class Verification(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
+        """Verification gate disabled — grant Member role instantly on join."""
         guild = member.guild
 
-        verif_role = discord.utils.get(guild.roles, name=VERIFICATION_ROLE_NAME)
-        if verif_role:
+        member_role = discord.utils.get(guild.roles, name=MEMBER_ROLE_NAME)
+        if member_role:
             try:
-                await member.add_roles(verif_role, reason="New member — pending verification")
+                await member.add_roles(member_role, reason="Auto-verified on join (verification disabled)")
             except (discord.Forbidden, discord.HTTPException) as e:
-                print(f"[verification] Could not assign {VERIFICATION_ROLE_NAME} to {member}: {e}")
+                print(f"[verification] Could not assign {MEMBER_ROLE_NAME} to {member}: {e}")
+        else:
+            print(f"[verification] Role '{MEMBER_ROLE_NAME}' not found — cannot auto-grant to {member}.")
 
-        verif_ch = discord.utils.get(guild.text_channels, name=VERIFICATION_CHANNEL)
-        if verif_ch:
-            embed = _make_verification_embed(guild)
-            embed.description = f"{member.mention} just joined.\n\n" + (embed.description or "")
-            await verif_ch.send(content=member.mention, embed=embed, view=VerificationView())
+        welcome_ch = discord.utils.get(guild.text_channels, name=WELCOME_CHANNEL)
+        if welcome_ch:
+            embed = discord.Embed(
+                title="New member",
+                description=(
+                    f"{member.mention} has joined **{guild.name}**.\n\n"
+                    f"Use `!register` to link your competitive programming handles "
+                    f"and start tracking your progress."
+                ),
+                color=COLOR_SUCCESS,
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text="Binary Beats — Competitive Programming Community")
+            await welcome_ch.send(embed=embed)
 
     @commands.command(name="sendverification", aliases=["sendverify"])
     async def send_verification(self, ctx):

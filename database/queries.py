@@ -1,6 +1,7 @@
 """
 database/queries.py — Every DB operation in one place.
-v2: Added day-window checks, months, manual adjustments, daily/weekly/monthly leaderboards.
+v2.2: monthly_solves snapshot table — weekly resets no longer affect monthly counts.
+      Added day_number_display() helper to cap day display at week length.
 """
 
 import asyncpg
@@ -25,6 +26,26 @@ def _day_window_utc(target_date: date) -> tuple[datetime, datetime]:
 
 def today_ist() -> date:
     return datetime.now(IST).date()
+
+
+def day_number_display(week_start: date, week_end: date, today: date) -> tuple[int, int]:
+    """
+    Returns (display_day, total_days) for the !problems header.
+
+    Rules:
+      - total_days  = (week_end - week_start).days + 1  (always correct)
+      - display_day = clamped to [1, total_days] so you never see "Day 8 of 7"
+                      even if today is past the week's end_date.
+
+    Example:
+      week: 2026-06-22 → 2026-06-28  (7 days)
+      today: 2026-06-29  →  display_day = 7  (capped), total_days = 7
+      → shows "Day 7 of 7 — Week complete" instead of "Day 8 of 7"
+    """
+    total_days  = (week_end - week_start).days + 1
+    raw_day     = (today - week_start).days + 1          # 1-based, may exceed total
+    display_day = max(1, min(raw_day, total_days))       # clamp to [1, total_days]
+    return display_day, total_days
 
 
 # ══════════════════════════════════════════════════════════════
@@ -218,10 +239,7 @@ async def get_problem_by_id(conn, problem_db_id: int):
 
 
 async def remove_problem_keep_solves(conn, problem_db_id: int, guild_id: str):
-    """Remove a problem WITHOUT deleting its solves (solves orphan gracefully via ON DELETE CASCADE
-    but we want to keep them for history — so we soft-remove by setting week_id = NULL)."""
-    # Actually CASCADE will delete solves. To keep solve history we simply delete the problem row
-    # but first detach it from the week so it doesn't cascade. We achieve this by setting week_id=NULL.
+    """Soft-remove by setting week_id = NULL so solves aren't cascade-deleted."""
     await conn.execute(
         "UPDATE problems SET week_id = NULL WHERE id = $1 AND guild_id = $2",
         problem_db_id, guild_id,
@@ -256,10 +274,6 @@ async def has_solved(conn, discord_id: str, problem_db_id: int) -> bool:
 
 
 async def get_solve_count_for_problem(conn, problem_db_id: int, guild_id: str) -> int:
-    """
-    Returns how many distinct members have solved this problem in this guild.
-    Used by !saferemove to gate deletion.
-    """
     row = await conn.fetchrow(
         "SELECT COUNT(*) AS cnt FROM solves WHERE problem_db_id = $1 AND guild_id = $2",
         problem_db_id, guild_id,
@@ -274,8 +288,16 @@ async def record_solve(
     guild_id:      str,
     solved_at:     datetime,
     points:        int,
+    month_id:      int | None = None,   # v2.2: pass the active month_id
 ) -> bool:
-    """Returns True if newly recorded, False if already existed."""
+    """
+    Returns True if newly recorded, False if already existed.
+
+    v2.2: Also writes to monthly_solves so that monthly leaderboard
+    data survives weekly resets. The two tables are written in the
+    same logical operation — if either INSERT fails the solve is not
+    double-counted (UNIQUE constraints on both tables).
+    """
     try:
         await conn.execute(
             """
@@ -284,9 +306,20 @@ async def record_solve(
             """,
             discord_id, problem_db_id, guild_id, solved_at, points,
         )
-        return True
     except asyncpg.UniqueViolationError:
-        return False
+        return False   # already in solves → monthly_solves already has it too
+
+    # Mirror into monthly_solves (ignore conflict — idempotent)
+    await conn.execute(
+        """
+        INSERT INTO monthly_solves
+            (discord_id, problem_db_id, guild_id, month_id, solved_at, points_awarded)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (discord_id, problem_db_id) DO NOTHING
+        """,
+        discord_id, problem_db_id, guild_id, month_id, solved_at, points,
+    )
+    return True
 
 
 async def get_user_solves(conn, discord_id: str, guild_id: str) -> list:
@@ -310,6 +343,7 @@ async def get_daily_leaderboard(conn, guild_id: str, target_date: date) -> list:
     """
     Points from problems whose assigned_date == target_date,
     solved within the IST day window of that date.
+    Reads from `solves` — daily is never affected by !resetmonth.
     """
     start_utc, end_utc = _day_window_utc(target_date)
     return await conn.fetch(
@@ -332,10 +366,36 @@ async def get_daily_leaderboard(conn, guild_id: str, target_date: date) -> list:
 
 async def get_weekly_leaderboard(conn, guild_id: str, week_id: int) -> list:
     """
-    Points from all solves within the week's problems PLUS manual point_adjustments.
-    Users with only adjustments (0 solves) are included via FULL OUTER JOIN so that
-    adjusted points always appear even when solve records were cleared.
+    Points from all solves within the week's problems PLUS manual point_adjustments
+    that were created within that week's date range.
+
+    Adjustment scoping: only adjustments with created_at inside
+    [max(week_start 00:00 IST, week's created_at), week_end 23:59 IST] count
+    for this week. The max() matters when an admin gives an adjustment
+    BEFORE running !setweek — that adjustment's created_at is earlier than
+    the week row's own created_at, so it's excluded from weekly (it still
+    counts on monthly, since monthly scoping is unaffected by this).
+    Adjustments from prior or future weeks are excluded so they never
+    bleed across week boundaries.
+
+    Reads from `solves` — the live table cleared on !resetweek.
     """
+    week_row = await conn.fetchrow(
+        "SELECT start_date, end_date, created_at FROM weeks WHERE id = $1", week_id
+    )
+    if not week_row:
+        return []
+
+    week_start_utc, _            = _day_window_utc(week_row["start_date"])
+    _,              week_end_utc = _day_window_utc(week_row["end_date"])
+
+    # Adjustments given before the week row was actually created (e.g. admin
+    # gave points earlier the same day, then ran !setweek) must NOT count on
+    # weekly — they only count on monthly. So the real lower bound for weekly
+    # adjustments is whichever is LATER: the week's start-of-day, or the
+    # moment the week was created in the DB.
+    week_start_utc = max(week_start_utc, week_row["created_at"])
+
     return await conn.fetch(
         """
         SELECT
@@ -355,12 +415,14 @@ async def get_weekly_leaderboard(conn, guild_id: str, week_id: int) -> list:
             SELECT discord_id, SUM(delta) AS delta
             FROM point_adjustments
             WHERE guild_id = $1
+              AND created_at >= $3
+              AND created_at <= $4
             GROUP BY discord_id
         ) adj ON adj.discord_id = sv.discord_id
         WHERE COALESCE(sv.solve_pts, 0) + COALESCE(adj.delta, 0) > 0
         ORDER BY total DESC
         """,
-        guild_id, week_id,
+        guild_id, week_id, week_start_utc, week_end_utc,
     )
 
 
@@ -369,17 +431,23 @@ async def get_monthly_leaderboard(
     guild_id:        str,
     month_start:     date,
     month_end:       date,
-    exclude_week_id: int | None = None,   # kept for API compatibility, unused in display
+    exclude_week_id: int | None = None,   # kept for API compat, unused
 ) -> list:
     """
-    Points from problems whose assigned_date falls within the month date range
-    PLUS manual point_adjustments for the guild.
+    v2.2 FIX: Reads from `monthly_solves` instead of `solves` so weekly
+    resets never affect monthly solve counts.
 
-    DISPLAY RULE: Shows ALL solves in the month window (including weekly problems).
-    Exclusion only applies to RESET operations, not reads.
-    Users with only adjustments (0 solves) are included via FULL OUTER JOIN so that
-    adjusted points always appear even when solve records were cleared.
+    Adjustment scoping: only adjustments with created_at inside
+    [month_start 00:00 IST, month_end 23:59 IST] count for this month.
+    Adjustments from outside the month window (e.g. previous months)
+    are excluded so they don't bleed across month boundaries.
+    BUT they DO still accumulate correctly — e.g. an adjustment given
+    in Week 1 of the month is included in the month total because
+    Week 1 falls inside the month's date range.
     """
+    month_start_utc, _             = _day_window_utc(month_start)
+    _,               month_end_utc = _day_window_utc(month_end)
+
     return await conn.fetch(
         """
         SELECT
@@ -387,26 +455,29 @@ async def get_monthly_leaderboard(
             COALESCE(sv.solve_pts, 0) + COALESCE(adj.delta, 0) AS total,
             COALESCE(sv.solved_count, 0) AS solved_count
         FROM (
-            SELECT s.discord_id,
-                   SUM(s.points_awarded) AS solve_pts,
+            SELECT ms.discord_id,
+                   SUM(ms.points_awarded) AS solve_pts,
                    COUNT(*) AS solved_count
-            FROM solves s
-            JOIN problems p ON p.id = s.problem_db_id
-            WHERE s.guild_id = $1
+            FROM monthly_solves ms
+            JOIN problems p ON p.id = ms.problem_db_id
+            WHERE ms.guild_id = $1
               AND p.assigned_date >= $2
               AND p.assigned_date <= $3
-            GROUP BY s.discord_id
+            GROUP BY ms.discord_id
         ) sv
         FULL OUTER JOIN (
+            -- Only adjustments given during this month's window
             SELECT discord_id, SUM(delta) AS delta
             FROM point_adjustments
             WHERE guild_id = $1
+              AND created_at >= $4
+              AND created_at <= $5
             GROUP BY discord_id
         ) adj ON adj.discord_id = sv.discord_id
         WHERE COALESCE(sv.solve_pts, 0) + COALESCE(adj.delta, 0) > 0
         ORDER BY total DESC
         """,
-        guild_id, month_start, month_end,
+        guild_id, month_start, month_end, month_start_utc, month_end_utc,
     )
 
 
@@ -493,7 +564,8 @@ async def get_user_adjustments(conn, guild_id: str, discord_id: str) -> list:
 # ══════════════════════════════════════════════════════════════
 
 async def reset_daily_solves(conn, guild_id: str, target_date: date) -> int:
-    """Delete solves for problems assigned on target_date, solved within that IST day."""
+    """Delete solves for problems assigned on target_date, solved within that IST day.
+    Does NOT touch monthly_solves — daily reset never affects monthly counts."""
     start_utc, end_utc = _day_window_utc(target_date)
     result = await conn.execute(
         """
@@ -509,6 +581,11 @@ async def reset_daily_solves(conn, guild_id: str, target_date: date) -> int:
 
 
 async def reset_current_week_solves(conn, guild_id: str) -> int:
+    """
+    Clears weekly solve records ONLY (from `solves` table).
+    monthly_solves is intentionally NOT touched here — that is what
+    fixes the "monthly shows 0 solved after !resetweek" bug.
+    """
     result = await conn.execute(
         """
         DELETE FROM solves
@@ -526,9 +603,8 @@ async def reset_current_week_solves(conn, guild_id: str) -> int:
 
 async def reset_current_month_solves(conn, guild_id: str) -> int:
     """
-    DEPRECATED — use reset_month_solves_only() which accepts explicit date
-    bounds and an optional exclude_week_id for safe, isolated monthly resets.
-    Kept here so any external callers don't break immediately.
+    DEPRECATED — use reset_month_solves_only().
+    Kept so external callers don't break.
     """
     month = await conn.fetchrow(
         "SELECT start_date, end_date FROM months WHERE guild_id = $1 AND is_active = TRUE ORDER BY id DESC LIMIT 1",
@@ -536,17 +612,8 @@ async def reset_current_month_solves(conn, guild_id: str) -> int:
     )
     if not month:
         return 0
-    week = await conn.fetchrow(
-        "SELECT id FROM weeks WHERE guild_id = $1 AND is_active = TRUE ORDER BY id DESC LIMIT 1",
-        guild_id,
-    )
     return await reset_month_solves_only(
-        conn,
-        guild_id,
-        month["start_date"],
-        month["end_date"],
-        protected_start=week["start_date"] if week else None,
-        protected_end=week["end_date"]   if week else None,
+        conn, guild_id, month["start_date"], month["end_date"],
     )
 
 
@@ -555,61 +622,34 @@ async def reset_month_solves_only(
     guild_id:        str,
     month_start:     date,
     month_end:       date,
-    protected_start: date | None = None,
-    protected_end:   date | None = None,
+    protected_start: date | None = None,   # kept for API compat, no longer used
+    protected_end:   date | None = None,   # kept for API compat, no longer used
 ) -> int:
     """
-    Deletes ONLY the monthly-scope solves — weekly and daily leaderboards
-    are completely untouched.
-
-    Strategy (no data loss):
-      • Target  : problems with assigned_date IN [month_start, month_end]
-      • Exclude : problems with assigned_date IN [protected_start, protected_end]
-                  i.e. the active week's window — those solves are preserved
-                  so the weekly and daily leaderboards keep their data intact.
-      • Uses date ranges only (not month_id) for the same robustness reason
-        documented on get_monthly_leaderboard.
-
-    No handles, users, problems, weeks, or out-of-scope solves are touched.
+    v2.2: Clears monthly_solves for the given date range.
+    The `solves` table (weekly/daily) is completely untouched.
+    protected_start/protected_end params are kept for compatibility
+    but are no longer needed — the two tables are now separate.
     """
-    if protected_start is not None and protected_end is not None:
-        result = await conn.execute(
-            """
-            DELETE FROM solves
-            WHERE guild_id = $1
-              AND problem_db_id IN (
-                  SELECT p.id FROM problems p
-                  WHERE p.guild_id = $1
-                    AND p.assigned_date >= $2
-                    AND p.assigned_date <= $3
-                    AND (
-                        p.week_id IS NULL
-                        OR p.assigned_date < $4
-                        OR p.assigned_date > $5
-                    )
-              )
-            """,
-            guild_id, month_start, month_end, protected_start, protected_end,
-        )
-    else:
-        # No active week — safe to clear all solves in the month date range
-        result = await conn.execute(
-            """
-            DELETE FROM solves
-            WHERE guild_id = $1
-              AND problem_db_id IN (
-                  SELECT p.id FROM problems p
-                  WHERE p.guild_id = $1
-                    AND p.assigned_date >= $2
-                    AND p.assigned_date <= $3
-              )
-            """,
-            guild_id, month_start, month_end,
-        )
+    result = await conn.execute(
+        """
+        DELETE FROM monthly_solves
+        WHERE guild_id = $1
+          AND problem_db_id IN (
+              SELECT p.id FROM problems p
+              WHERE p.guild_id = $1
+                AND p.assigned_date >= $2
+                AND p.assigned_date <= $3
+          )
+        """,
+        guild_id, month_start, month_end,
+    )
     return int(result.split()[-1])
 
 
 async def reset_all_solves(conn, guild_id: str) -> int:
+    """Nuclear wipe — clears both solves and monthly_solves."""
+    await conn.execute("DELETE FROM monthly_solves WHERE guild_id = $1", guild_id)
     result = await conn.execute(
         "DELETE FROM solves WHERE guild_id = $1", guild_id,
     )
@@ -617,6 +657,7 @@ async def reset_all_solves(conn, guild_id: str) -> int:
 
 
 async def reset_user_week_solves(conn, discord_id: str, guild_id: str) -> int:
+    """Clears one user's weekly solves. monthly_solves preserved."""
     result = await conn.execute(
         """
         DELETE FROM solves
@@ -633,6 +674,11 @@ async def reset_user_week_solves(conn, discord_id: str, guild_id: str) -> int:
 
 
 async def reset_user_all_solves(conn, discord_id: str, guild_id: str) -> int:
+    """Clears all solves for one user — both tables."""
+    await conn.execute(
+        "DELETE FROM monthly_solves WHERE discord_id = $1 AND guild_id = $2",
+        discord_id, guild_id,
+    )
     result = await conn.execute(
         "DELETE FROM solves WHERE discord_id = $1 AND guild_id = $2",
         discord_id, guild_id,
@@ -641,6 +687,11 @@ async def reset_user_all_solves(conn, discord_id: str, guild_id: str) -> int:
 
 
 async def unmark_problem_solves(conn, problem_db_id: int, guild_id: str) -> int:
+    """Remove all solves for one problem — both tables."""
+    await conn.execute(
+        "DELETE FROM monthly_solves WHERE problem_db_id = $1 AND guild_id = $2",
+        problem_db_id, guild_id,
+    )
     result = await conn.execute(
         "DELETE FROM solves WHERE problem_db_id = $1 AND guild_id = $2",
         problem_db_id, guild_id,
@@ -649,6 +700,8 @@ async def unmark_problem_solves(conn, problem_db_id: int, guild_id: str) -> int:
 
 
 async def reset_week_and_problems(conn, guild_id: str) -> dict:
+    """!resetweekfull — deletes solves + problems + deactivates week.
+    monthly_solves rows are deleted via ON DELETE CASCADE on problems.id."""
     week = await conn.fetchrow(
         "SELECT id FROM weeks WHERE guild_id = $1 AND is_active = TRUE ORDER BY id DESC LIMIT 1",
         guild_id,
@@ -666,19 +719,17 @@ async def reset_week_and_problems(conn, guild_id: str) -> dict:
     await conn.execute("UPDATE weeks SET is_active = FALSE WHERE id = $1", week_id)
     return {"solves": int(r1.split()[-1]), "problems": int(r2.split()[-1]), "week_id": week_id}
 
+
 # ══════════════════════════════════════════════════════════════
 #  BOT CONFIG  (generic key/value store — used by !setcookie)
 # ══════════════════════════════════════════════════════════════
 
 async def get_config(conn, key: str) -> str | None:
-    """Return the stored value for `key`, or None if not set."""
     row = await conn.fetchrow("SELECT value FROM bot_config WHERE key = $1", key)
     return row["value"] if row else None
 
 
 async def set_config(conn, key: str, value: str, updated_by: str):
-    """Insert or overwrite a config value. No data loss — old value is replaced,
-    never deleted as a row (so `updated_at` always reflects the latest write)."""
     await conn.execute(
         """
         INSERT INTO bot_config (key, value, updated_by, updated_at)
