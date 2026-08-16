@@ -56,6 +56,16 @@ INACTIVITY_CHANNEL     = os.getenv("INACTIVITY_CHANNEL",    "general")
 _checkall_ch = os.getenv("CHECKALL_CHANNEL_ID", "")
 CHECKALL_CHANNEL_ID: int | None = int(_checkall_ch) if _checkall_ch.isdigit() else None
 
+# ── Week/Month-end leaderboard announcement (cogs/checker.py) ────────────────
+# Fires automatically from the 23:58 IST nightly check, ONLY on the exact
+# last day of the currently active week / month (never on a normal daily run).
+# Channel where the announcement gets posted:
+_lb_announce_ch = os.getenv("LEADERBOARD_ANNOUNCE_CHANNEL_ID", "")
+LEADERBOARD_ANNOUNCE_CHANNEL_ID: int | None = int(_lb_announce_ch) if _lb_announce_ch.isdigit() else None
+# Role to ping in that announcement — plain numeric role ID (no <@&> wrapper).
+# Leave blank to skip the ping and just post the message.
+LEADERBOARD_PING_ROLE_ID = os.getenv("LEADERBOARD_PING_ROLE_ID", "")
+
 # ── Contest reminder system (cogs/contests.py) ────────────────────────────────
 # Channel name where reminders are posted (no # prefix)
 CONTEST_REMINDER_CHANNEL = os.getenv("CONTEST_REMINDER_CHANNEL", "contest-reminder")

@@ -57,7 +57,22 @@ try:
 except ImportError:
     CHECKALL_CHANNEL_ID = None
 
+# Week/Month-end leaderboard announcement — see config.py for details.
+try:
+    from config import LEADERBOARD_ANNOUNCE_CHANNEL_ID
+except ImportError:
+    LEADERBOARD_ANNOUNCE_CHANNEL_ID = None
+
+try:
+    from config import LEADERBOARD_PING_ROLE_ID
+except ImportError:
+    LEADERBOARD_PING_ROLE_ID = ""
+
 IST = q.IST
+
+# Used only by the week/month-end announcement below (kept local to this file
+# so nothing in leaderboard.py needs to change).
+_ANNOUNCE_MEDALS = ["🥇", "🥈", "🥉"]
 
 # Same fixed display order used by !problems, so !check / !checkall always
 # list problems in the identical sequence the user already sees there.
@@ -535,6 +550,69 @@ class Checker(commands.Cog):
     async def before_auto_check(self):
         await self.bot.wait_until_ready()
 
+    # ── Week/Month-end leaderboard announcement ──────────────────────────────
+    # Only ever called from _night_check_loop, and only when `today` is the
+    # exact last day of the active week/month. Purely additive — does not
+    # touch !leaderboard / !lbfull or their queries.
+
+    def _announcement_content(self, guild: discord.Guild, kind: str, label: str, rows: list) -> str:
+        role_mention = f"<@&{LEADERBOARD_PING_ROLE_ID}>" if LEADERBOARD_PING_ROLE_ID else "@here"
+        is_monthly   = kind == "monthly"
+        title_word   = "Monthly" if is_monthly else "Weekly"
+        period_word  = "month" if is_monthly else "week"
+
+        lines = [
+            f"Hey {role_mention} !",
+            f"🏅 __**{title_word} Leaderboard — {label}**__",
+            "The results are in!",
+            (
+                f"A big congratulations to everyone who stayed consistent throughout the {period_word}. "
+                "Your dedication, discipline, and hard work continue to make Binary Beats an amazing community."
+            ),
+            "",
+        ]
+
+        if not rows:
+            lines.append(f"*No scores were recorded this {period_word}.*")
+        else:
+            top3 = rows[:3]
+            rest = rows[3:15]
+
+            lines.append("**Top Performers**")
+            for i, r in enumerate(top3):
+                member = guild.get_member(int(r["discord_id"]))
+                name   = member.display_name if member else "Left server"
+                solved = r.get("solved_count", 0)
+                lines.append(f"{_ANNOUNCE_MEDALS[i]} **{name}** — **{r['total']} pts**  ·  {solved} solved")
+
+            if rest:
+                lines.append("")
+                lines.append("**Leaderboard**")
+                for idx, r in enumerate(rest, start=4):
+                    member = guild.get_member(int(r["discord_id"]))
+                    name   = member.display_name if member else "Left server"
+                    solved = r.get("solved_count", 0)
+                    lines.append(f"> • #{idx} {name} — {r['total']} pts  ·  {solved} solved")
+
+        lines.append("")
+        lines.append("— __**Binary Beats Team**__")
+        lines.append("**Code • Compete • Conquer**")
+
+        return "\n".join(lines)
+
+    async def _post_period_announcement(self, guild: discord.Guild, kind: str, label: str, rows: list):
+        if not LEADERBOARD_ANNOUNCE_CHANNEL_ID:
+            return
+        channel = guild.get_channel(LEADERBOARD_ANNOUNCE_CHANNEL_ID)
+        if not channel:
+            return
+        try:
+            content = self._announcement_content(guild, kind, label, rows)
+            await channel.send(content)
+            print(f"[period_announcement] Guild {guild.id}: posted {kind} announcement.")
+        except Exception as e:
+            print(f"[period_announcement] Guild {guild.id}: failed to send {kind} announcement: {e}")
+
     # ── Background: nightly check at 23:58 IST ───────────────────────────────
 
     async def _night_check_loop(self):
@@ -561,32 +639,58 @@ class Checker(commands.Cog):
                 try:
                     async with pool.acquire() as conn:
                         week  = await q.get_active_week(conn, str(guild.id))
-                        if not week:
-                            continue
-                        probs = _sorted_probs(await q.get_problems_for_day(conn, str(guild.id), today))
+                        month = await q.get_active_month(conn, str(guild.id))
+                        probs = (
+                            _sorted_probs(await q.get_problems_for_day(conn, str(guild.id), today))
+                            if week else []
+                        )
 
-                    if not probs:
-                        print(f"[night_check] Guild {guild.id}: no problems today, skipping.")
-                        continue
+                    if not week:
+                        print(f"[night_check] Guild {guild.id}: no active week, skipping bulk-check.")
+                    elif not probs:
+                        print(f"[night_check] Guild {guild.id}: no problems today, skipping bulk-check.")
+                    else:
+                        summary, total_new = await self._bulk_check_guild(
+                            guild, probs, str(guild.id)
+                        )
+                        print(f"[night_check] Guild {guild.id}: {total_new} new pts awarded.")
 
-                    summary, total_new = await self._bulk_check_guild(
-                        guild, probs, str(guild.id)
-                    )
-                    print(f"[night_check] Guild {guild.id}: {total_new} new pts awarded.")
+                        # Post summary to configured channel (optional)
+                        if CHECKALL_CHANNEL_ID:
+                            channel = guild.get_channel(CHECKALL_CHANNEL_ID)
+                            if channel:
+                                embed = discord.Embed(
+                                    title=f"Nightly Auto-Check  ·  {today}",
+                                    description="\n".join(summary) or "No members found.",
+                                    color=COLOR_INFO,
+                                )
+                                embed.set_footer(
+                                    text=f"Auto-run at 23:58 IST  ·  New points this run: {total_new}  ·  Week: {week['label']}"
+                                )
+                                await channel.send(embed=embed)
 
-                    # Post summary to configured channel (optional)
-                    if CHECKALL_CHANNEL_ID:
-                        channel = guild.get_channel(CHECKALL_CHANNEL_ID)
-                        if channel:
-                            embed = discord.Embed(
-                                title=f"Nightly Auto-Check  ·  {today}",
-                                description="\n".join(summary) or "No members found.",
-                                color=COLOR_INFO,
+                    # ── Week-end / Month-end leaderboard announcement ──────────
+                    # Purely additive. Fires ONLY on the exact last day of the
+                    # currently active week / month — never on a normal daily
+                    # run, and independent of whether today had problems set.
+                    #
+                    # If both a week AND a month end on the same day, only the
+                    # MONTHLY announcement is posted (weekly is skipped) so the
+                    # channel doesn't get two back-to-back leaderboard pings.
+                    month_ends_today = bool(month and today == month["end_date"])
+                    week_ends_today  = bool(week and today == week["end_date"])
+
+                    if month_ends_today:
+                        async with pool.acquire() as conn:
+                            monthly_rows = await q.get_monthly_leaderboard(
+                                conn, str(guild.id), month["start_date"], month["end_date"]
                             )
-                            embed.set_footer(
-                                text=f"Auto-run at 23:58 IST  ·  New points this run: {total_new}  ·  Week: {week['label']}"
-                            )
-                            await channel.send(embed=embed)
+                        await self._post_period_announcement(guild, "monthly", month["label"], monthly_rows)
+
+                    elif week_ends_today:
+                        async with pool.acquire() as conn:
+                            weekly_rows = await q.get_weekly_leaderboard(conn, str(guild.id), week["id"])
+                        await self._post_period_announcement(guild, "weekly", week["label"], weekly_rows)
 
                 except Exception as e:
                     print(f"[night_check] Guild {guild.id} error: {e}")

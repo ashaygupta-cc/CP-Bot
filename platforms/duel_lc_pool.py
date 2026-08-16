@@ -2,24 +2,46 @@
 platforms/duel_lc_pool.py — LeetCode problem POOL for the duel system.
 
 Separate from platforms/leetcode.py (handle verify + submission check via
-recentAcSubmissionList). This module fetches the public problem list via
-LeetCode's `problemsetQuestionList` GraphQL query, cached in memory, and
-picks a random non-premium problem of a given difficulty.
+recentAcSubmissionList). This module fetches the public problem list and
+caches it in memory, then picks a random non-premium problem of a given
+difficulty.
+
+FIX (was throwing HTTP 400 on every fetch):
+  The old `questionList` GraphQL query has been deprecated by LeetCode and
+  now returns HTTP 400 for most callers. Fetching went through this single
+  query with no fallback, so `_load_pool` raised on every call and duels
+  couldn't start.
+
+  Fixed with a three-tier fallback chain, each tier only tried if the
+  previous one fails:
+    1. REST  `/api/problems/all/`            — simple, stable, unauthenticated,
+                                                 returns ALL difficulties in one
+                                                 call (so we fetch it once and
+                                                 filter in memory, instead of
+                                                 once per difficulty).
+    2. GraphQL `problemsetQuestionListV2`     — the current schema LeetCode's
+                                                 own site uses.
+    3. GraphQL `questionList` (legacy)        — kept as a last resort in case
+                                                 REST and V2 both get blocked.
 
 Rate-limit safety (per your earlier confirmation):
   • Small random delay before each network call.
-  • Realistic browser-like headers.
-  • Full list fetched once per difficulty and cached — a duel/blitz match
-    never needs to query LeetCode again once problems are already
-    pre-fetched at match start.
+  • Realistic browser-like headers (aligned with platforms/leetcode.py style).
+  • Full list fetched once (all difficulties together) and cached — a
+    duel/blitz match never needs to query LeetCode again once problems are
+    already pre-fetched at match start.
 """
 
 import asyncio
+import logging
 import random
 import time
 import aiohttp
 
+logger = logging.getLogger(__name__)
+
 LC_GQL = "https://leetcode.com/graphql"
+LC_REST_ALL = "https://leetcode.com/api/problems/all/"
 
 _HEADERS = {
     "Content-Type": "application/json",
@@ -28,7 +50,25 @@ _HEADERS = {
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 }
 
-LIST_QUERY = """
+# Current schema LeetCode's own site uses as of 2025/2026.
+QUESTION_LIST_V2_QUERY = """
+query problemsetQuestionListV2($categorySlug: String, $limit: Int, $skip: Int, $filters: QuestionFilterInput) {
+  problemsetQuestionListV2(categorySlug: $categorySlug, limit: $limit, skip: $skip, filters: $filters) {
+    questions {
+      titleSlug
+      title
+      difficulty
+      paidOnly
+    }
+    totalLength
+    hasMore
+  }
+}
+"""
+
+# Deprecated (HTTP 400 for most callers as of this fix) — kept only as a
+# last-resort fallback in case both REST and V2 are unavailable.
+LEGACY_QUESTION_LIST_QUERY = """
 query problemsetQuestionList($categorySlug: String, $limit: Int, $skip: Int, $filters: QuestionListFilterInput) {
   problemsetQuestionList: questionList(categorySlug: $categorySlug, limit: $limit, skip: $skip, filters: $filters) {
     total: totalNum
@@ -43,60 +83,182 @@ query problemsetQuestionList($categorySlug: String, $limit: Int, $skip: Int, $fi
 """
 
 CACHE_TTL = 6 * 3600
-_cache: dict[str, dict] = {}   # difficulty -> {"problems": [...], "ts": float}
+# Single cache for the full (all-difficulty) problem list — fetched once via
+# whichever tier succeeds, then filtered per-difficulty in memory.
+_all_cache: dict | None = None  # {"problems": [...], "ts": float}
 _lock = asyncio.Lock()
 
 DIFFICULTIES = {"easy": "Easy", "medium": "Medium", "hard": "Hard"}
+_LEVEL_TO_DIFFICULTY = {1: "Easy", 2: "Medium", 3: "Hard"}
 
 
-async def _gql_with_backoff(query: str, variables: dict, retries: int = 2) -> dict:
-    last_err = RuntimeError("LeetCode request failed.")
-    for attempt in range(retries + 1):
-        await asyncio.sleep(random.uniform(2, 5))
-        try:
-            async with aiohttp.ClientSession(headers=_HEADERS) as s:
-                async with s.post(
-                    LC_GQL, json={"query": query, "variables": variables},
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as r:
-                    if r.status == 200:
-                        return await r.json()
-                    last_err = RuntimeError(f"LeetCode HTTP {r.status}")
-        except asyncio.TimeoutError:
-            last_err = RuntimeError("LeetCode request timed out.")
-        except aiohttp.ClientError as e:
-            last_err = RuntimeError(f"LeetCode network error: {e}")
-        if attempt < retries:
-            await asyncio.sleep(3 * (attempt + 1))
-    raise last_err
+async def _sleep_jitter() -> None:
+    await asyncio.sleep(random.uniform(2, 5))
 
 
-async def _load_pool(difficulty_key: str) -> list[dict]:
-    difficulty = DIFFICULTIES[difficulty_key]
-    now = time.time()
-    cached = _cache.get(difficulty_key)
-    if cached and (now - cached["ts"]) < CACHE_TTL:
-        return cached["problems"]
+async def _fetch_rest_all() -> list[dict]:
+    """Tier 1: REST /api/problems/all/ — returns every problem, every
+    difficulty, in a single unauthenticated call."""
+    await _sleep_jitter()
+    async with aiohttp.ClientSession(headers=_HEADERS) as s:
+        async with s.get(
+            LC_REST_ALL, timeout=aiohttp.ClientTimeout(total=15)
+        ) as r:
+            if r.status != 200:
+                raise RuntimeError(f"LeetCode REST HTTP {r.status}")
+            data = await r.json()
 
-    async with _lock:
-        cached = _cache.get(difficulty_key)
-        now = time.time()
-        if cached and (now - cached["ts"]) < CACHE_TTL:
-            return cached["problems"]
+    pairs = data.get("stat_status_pairs") or []
+    problems = []
+    for p in pairs:
+        stat = p.get("stat") or {}
+        level = (p.get("difficulty") or {}).get("level")
+        difficulty = _LEVEL_TO_DIFFICULTY.get(level)
+        slug = stat.get("question__title_slug")
+        title = stat.get("question__title")
+        if not (difficulty and slug and title):
+            continue
+        problems.append({
+            "titleSlug": slug,
+            "title": title,
+            "difficulty": difficulty,
+            "isPaidOnly": bool(p.get("paid_only")),
+        })
+    if not problems:
+        raise RuntimeError("LeetCode REST returned no usable problems.")
+    return problems
 
+
+async def _gql_post(query: str, variables: dict) -> dict:
+    async with aiohttp.ClientSession(headers=_HEADERS) as s:
+        async with s.post(
+            LC_GQL, json={"query": query, "variables": variables},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as r:
+            if r.status != 200:
+                raise RuntimeError(f"LeetCode HTTP {r.status}")
+            return await r.json()
+
+
+async def _fetch_gql_v2_all() -> list[dict]:
+    """Tier 2: current problemsetQuestionListV2 schema, unfiltered so we get
+    every difficulty back in one shot."""
+    await _sleep_jitter()
+    variables = {"categorySlug": "", "limit": 3500, "skip": 0, "filters": {}}
+    data = await _gql_post(QUESTION_LIST_V2_QUERY, variables)
+    payload = data.get("data", {}).get("problemsetQuestionListV2") or {}
+    questions = payload.get("questions") or []
+    if not questions:
+        raise RuntimeError("LeetCode GraphQL V2 returned no questions.")
+
+    problems = []
+    for q in questions:
+        slug = q.get("titleSlug")
+        title = q.get("title")
+        difficulty_raw = (q.get("difficulty") or "").capitalize()
+        if not (slug and title and difficulty_raw in DIFFICULTIES.values()):
+            continue
+        problems.append({
+            "titleSlug": slug,
+            "title": title,
+            "difficulty": difficulty_raw,
+            "isPaidOnly": bool(q.get("paidOnly")),
+        })
+    if not problems:
+        raise RuntimeError("LeetCode GraphQL V2 returned no usable problems.")
+    return problems
+
+
+async def _fetch_gql_legacy_all() -> list[dict]:
+    """Tier 3 (last resort): the deprecated questionList query, called once
+    per difficulty since its filter is mandatory-shaped that way."""
+    problems = []
+    for difficulty in DIFFICULTIES.values():
+        await _sleep_jitter()
         variables = {
             "categorySlug": "",
             "limit": 400,
             "skip": 0,
             "filters": {"difficulty": difficulty},
         }
-        data = await _gql_with_backoff(LIST_QUERY, variables)
+        data = await _gql_post(LEGACY_QUESTION_LIST_QUERY, variables)
         questions = (
             data.get("data", {}).get("problemsetQuestionList", {}).get("questions") or []
         )
-        pool = [q for q in questions if not q.get("isPaidOnly")]
-        _cache[difficulty_key] = {"problems": pool, "ts": time.time()}
-        return pool
+        for q in questions:
+            problems.append({
+                "titleSlug": q["titleSlug"],
+                "title": q["title"],
+                "difficulty": q["difficulty"],
+                "isPaidOnly": bool(q.get("isPaidOnly")),
+            })
+    if not problems:
+        raise RuntimeError("LeetCode legacy GraphQL query returned no questions.")
+    return problems
+
+
+async def _fetch_with_retries(fetch_fn, retries: int = 2) -> list[dict]:
+    last_err: Exception = RuntimeError("LeetCode request failed.")
+    for attempt in range(retries + 1):
+        try:
+            return await fetch_fn()
+        except asyncio.TimeoutError:
+            last_err = RuntimeError("LeetCode request timed out.")
+        except aiohttp.ClientError as e:
+            last_err = RuntimeError(f"LeetCode network error: {e}")
+        except RuntimeError as e:
+            last_err = e
+        if attempt < retries:
+            await asyncio.sleep(3 * (attempt + 1))
+    raise last_err
+
+
+async def _load_all_problems() -> list[dict]:
+    global _all_cache
+    now = time.time()
+    if _all_cache and (now - _all_cache["ts"]) < CACHE_TTL:
+        return _all_cache["problems"]
+
+    async with _lock:
+        now = time.time()
+        if _all_cache and (now - _all_cache["ts"]) < CACHE_TTL:
+            return _all_cache["problems"]
+
+        problems: list[dict] | None = None
+        for tier_name, fetch_fn in (
+            ("REST /api/problems/all/", _fetch_rest_all),
+            ("GraphQL problemsetQuestionListV2", _fetch_gql_v2_all),
+            ("GraphQL questionList (legacy)", _fetch_gql_legacy_all),
+        ):
+            try:
+                problems = await _fetch_with_retries(fetch_fn)
+                logger.info("LeetCode pool fetched via %s (%d problems).", tier_name, len(problems))
+                break
+            except Exception as e:
+                logger.warning("LeetCode pool fetch tier '%s' failed: %s", tier_name, e)
+                continue
+
+        if problems is None:
+            # All tiers failed — keep any stale cache rather than nothing,
+            # otherwise surface an empty pool.
+            if _all_cache:
+                logger.error("All LeetCode fetch tiers failed; serving stale cache.")
+                return _all_cache["problems"]
+            logger.error("All LeetCode fetch tiers failed; no cache available.")
+            return []
+
+        _all_cache = {"problems": problems, "ts": time.time()}
+        return problems
+
+
+async def _load_pool(difficulty_key: str) -> list[dict]:
+    difficulty = DIFFICULTIES[difficulty_key]
+    all_problems = await _load_all_problems()
+    pool = [
+        q for q in all_problems
+        if q["difficulty"] == difficulty and not q.get("isPaidOnly")
+    ]
+    return pool
 
 
 async def pick_lc_problem(difficulty_key: str, pair_history: set[str]) -> dict | None:
@@ -125,7 +287,7 @@ async def pick_lc_problem(difficulty_key: str, pair_history: set[str]) -> dict |
 async def pick_sequence(num_problems: int, pair_history: set[str]) -> list[dict]:
     """
     Pick problem sequence for LeetCode matches.
-    
+
     num_problems == 2: Medium + Medium (for 2-problem format)
     num_problems == 3: Easy + Medium + Hard (for 3-problem format, Bo3)
     """
@@ -133,7 +295,7 @@ async def pick_sequence(num_problems: int, pair_history: set[str]) -> list[dict]
         difficulties = ("medium", "medium")
     else:  # num_problems == 3 or default
         difficulties = ("easy", "medium", "hard")
-    
+
     used = set(pair_history)
     out = []
     for diff in difficulties:

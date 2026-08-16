@@ -4,10 +4,12 @@ services:
     runtime: python
     pythonVersion: 3.14
     buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
+    startCommand: python -u bot.py
     healthCheckPath: /health
     healthCheckProtocol: http
     envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
       - key: DISCORD_TOKEN
         sync: false
       - key: DATABASE_URL
