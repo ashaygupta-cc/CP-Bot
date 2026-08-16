@@ -1,6 +1,6 @@
 """
-cogs/points.py  (NEW)
-Manual point management: /addpoints, /subpoints, /setuserpointsmanual, /pointlog
+cogs/points.py
+Manual point management: !addpoints, !subpoints, !setmemberpoints, !pointlog
 Admin-only. Points stored in point_adjustments table.
 """
 
@@ -26,7 +26,7 @@ class Points(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # ── /addpoints ──────────────────────────────────────────────────────────
+    # ── !addpoints ──────────────────────────────────────────────────────────
 
     @commands.command(name="addpoints")
     @is_admin()
@@ -34,7 +34,7 @@ class Points(commands.Cog):
                          amount: int = None, *, reason: str = "Manual adjustment"):
         """
         Add points to a member manually.
-        /addpoints @user 10 Bonus for participation
+        !addpoints @user 10 Bonus for participation
         """
         if not member or amount is None:
             embed = discord.Embed(title="➕  Add Points  —  Usage", color=COLOR_INFO)
@@ -72,7 +72,7 @@ class Points(commands.Cog):
         embed.set_footer(text=f"By {ctx.author.display_name}")
         await ctx.send(embed=embed)
 
-    # ── /subpoints ──────────────────────────────────────────────────────────
+    # ── !subpoints ──────────────────────────────────────────────────────────
 
     @commands.command(name="subpoints")
     @is_admin()
@@ -80,7 +80,7 @@ class Points(commands.Cog):
                          amount: int = None, *, reason: str = "Manual deduction"):
         """
         Subtract points from a member.
-        /subpoints @user 5 Late submission penalty
+        !subpoints @user 5 Late submission penalty
         """
         if not member or amount is None:
             embed = discord.Embed(title="➖  Subtract Points  —  Usage", color=COLOR_INFO)
@@ -118,9 +118,9 @@ class Points(commands.Cog):
         embed.set_footer(text=f"By {ctx.author.display_name}")
         await ctx.send(embed=embed)
 
-    # ── /setpoints ──────────────────────────────────────────────────────────
-    # Note: /setpoints in admin.py sets difficulty→points config.
-    # This is /setmemberpoints to set a member's adjustment total to an exact value.
+    # ── !setmemberpoints ────────────────────────────────────────────────────
+    # Note: !setpoints in admin.py sets difficulty→points config.
+    # This is !setmemberpoints to set a member's adjustment total to an exact value.
 
     @commands.command(name="setmemberpoints")
     @is_admin()
@@ -129,7 +129,7 @@ class Points(commands.Cog):
         """
         Force a member's adjustment total to an exact value.
         Calculates the delta needed from current total.
-        /setmemberpoints @user 50 Override for contest
+        !setmemberpoints @user 50 Override for contest
         """
         if not member or target is None:
             embed = discord.Embed(title="🎯  Set Member Points  —  Usage", color=COLOR_INFO)
@@ -176,13 +176,13 @@ class Points(commands.Cog):
         embed.set_footer(text=f"By {ctx.author.display_name}")
         await ctx.send(embed=embed)
 
-    # ── /pointlog ───────────────────────────────────────────────────────────
+    # ── !pointlog ───────────────────────────────────────────────────────────
 
     @commands.command(name="pointlog")
     async def point_log(self, ctx, member: discord.Member = None):
         """
         Show recent manual point adjustments for a member.
-        /pointlog @user
+        !pointlog @user
         """
         target = member or ctx.author
         pool   = get_pool()

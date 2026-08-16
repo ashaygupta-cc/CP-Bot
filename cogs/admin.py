@@ -1,7 +1,6 @@
 """
 cogs/admin.py
-Commands: /setweek, /setmonth, /currentweek, /setpoints, /points
-v2: Added /setmonth, professional embeds
+Commands: !setweek, !setmonth, !currentweek, !setpoints, !points
 """
 
 import discord
@@ -35,7 +34,7 @@ class Admin(commands.Cog):
     async def set_week(self, ctx, label: str = None, start: str = None, end: str = None):
         """
         Create a new active week (deactivates previous).
-        /setweek "Week 1" 2026-06-23 2026-06-29
+        !setweek "Week 1" 2026-06-23 2026-06-29
         """
         if not label or not start or not end:
             embed = discord.Embed(title="📅  Set Week  —  Usage", color=COLOR_INFO)
@@ -88,7 +87,7 @@ class Admin(commands.Cog):
     async def set_month(self, ctx, label: str = None, start: str = None, end: str = None):
         """
         Create a new active month for monthly leaderboard tracking.
-        /setmonth "June 2026" 2026-06-01 2026-06-30
+        !setmonth "June 2026" 2026-06-01 2026-06-30
         """
         if not label or not start or not end:
             embed = discord.Embed(title="📆  Set Month  —  Usage", color=COLOR_INFO)
@@ -185,7 +184,7 @@ class Admin(commands.Cog):
     async def set_points(self, ctx, difficulty: str = None, points: int = None):
         """
         Set how many points a difficulty level is worth.
-        /setpoints easy 8
+        !setpoints easy 8
         """
         if not difficulty or points is None:
             embed = discord.Embed(title="⚙️  Set Points  —  Usage", color=COLOR_INFO)

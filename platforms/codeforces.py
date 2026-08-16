@@ -63,7 +63,7 @@ class CodeforcesAdapter(PlatformAdapter):
             ))
         return results
 
-    async def check_solved(self, handle: str, problem_id: str, since_ts: float) -> tuple[bool, str]:
+    async def check_solved(self, handle: str, problem_id: str, since_ts: float, until_ts: float = None) -> tuple[bool, str]:
         contest = "".join(filter(str.isdigit, problem_id))
         index   = "".join(filter(str.isalpha, problem_id)).upper()
 
@@ -92,7 +92,7 @@ class CodeforcesAdapter(PlatformAdapter):
             sub_idx  = prob.get("index", "").upper()
             sub_time = float(sub.get("creationTimeSeconds", 0))
 
-            if sub_cid == contest and sub_idx == index and sub_time >= since_ts:
+            if sub_cid == contest and sub_idx == index and sub_time >= since_ts and (until_ts is None or sub_time <= until_ts):
                 return True, "✅ Accepted"
 
         return False, "❌ No accepted submission found within the time window."

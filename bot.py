@@ -1,5 +1,5 @@
 """
-bot.py — Entry point (v2)
+bot.py — Entry point (v3)
 Prefix changed to /  ·  Cogs: registry, admin, problems, checker,
 leaderboard, submissions, reset, points
 """
@@ -143,7 +143,7 @@ async def help_cmd(ctx, section: str = None):
         value="`cf` Codeforces · `lc` LeetCode · `cc` CodeChef · `atcoder` AtCoder",
         inline=False,
     )
-    embed.set_footer(text="Points only awarded for problems solved on their assigned day (midnight–midnight IST)")
+    embed.set_footer(text="Points locked to assigned day only — 00:00–23:59 IST. Daily board auto-resets at midnight IST.")
     await ctx.send(embed=embed)
 
 

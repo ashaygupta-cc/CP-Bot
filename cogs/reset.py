@@ -4,13 +4,13 @@ Admin-only reset commands.
 v2: Daily / Weekly / Monthly reset with correct scope isolation.
 
 Rules:
-  - /resetdaily    — only clears today's solve records (weekly/monthly untouched)
-  - /resetweek     — clears weekly solves (also resets daily since daily is a subset)
-  - /resetmonth    — clears monthly solves (also resets daily + weekly subsets)
-  - /resetalltime  — nuclear wipe of all solves
-  - /resetuser     — reset specific user
-  - /resetproblem  — un-mark solves for one problem (keep solve history option)
-  - /resetweekfull — delete solves + problems + deactivate week
+  - !resetdaily    — only clears today's solve records (weekly/monthly untouched)
+  - !resetweek     — clears weekly solves (also resets daily since daily is a subset)
+  - !resetmonth    — clears monthly solves (also resets daily + weekly subsets)
+  - !resetalltime  — nuclear wipe of all solves
+  - !resetuser     — reset specific user
+  - !resetproblem  — un-mark solves for one problem (keep solve history option)
+  - !resetweekfull — delete solves + problems + deactivate week
 """
 
 import asyncio
@@ -51,7 +51,7 @@ class Reset(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # ── /resetdaily ─────────────────────────────────────────────────────────
+    # ── !resetdaily ─────────────────────────────────────────────────────────
 
     @commands.command(name="resetdaily")
     @is_admin()
@@ -59,7 +59,7 @@ class Reset(commands.Cog):
         """
         Reset today's leaderboard only.
         Weekly and monthly leaderboards are NOT affected.
-        /resetdaily
+        !resetdaily
         """
         today = q.today_ist()
         embed = discord.Embed(
@@ -86,7 +86,7 @@ class Reset(commands.Cog):
         embed.set_footer(text=f"By {ctx.author.display_name}  ·  Weekly/Monthly untouched")
         await ctx.send(embed=embed)
 
-    # ── /resetweek ──────────────────────────────────────────────────────────
+    # ── !resetweek ──────────────────────────────────────────────────────────
 
     @commands.command(name="resetweek")
     @is_admin()
@@ -95,7 +95,7 @@ class Reset(commands.Cog):
         Reset the current week's leaderboard.
         Also clears today's daily (daily is a subset of weekly).
         Weekly leaderboard goes to zero. Monthly is NOT affected.
-        /resetweek
+        !resetweek
         """
         pool = get_pool()
         async with pool.acquire() as conn:
@@ -133,7 +133,7 @@ class Reset(commands.Cog):
         embed.set_footer(text=f"By {ctx.author.display_name}  ·  Monthly leaderboard untouched")
         await ctx.send(embed=embed)
 
-    # ── /resetmonth ─────────────────────────────────────────────────────────
+    # ── !resetmonth ─────────────────────────────────────────────────────────
 
     @commands.command(name="resetmonth")
     @is_admin()
@@ -141,7 +141,7 @@ class Reset(commands.Cog):
         """
         Reset the current month's leaderboard.
         Also resets daily and weekly (they are subsets of monthly).
-        /resetmonth
+        !resetmonth
         """
         pool = get_pool()
         async with pool.acquire() as conn:
@@ -175,14 +175,14 @@ class Reset(commands.Cog):
         embed.set_footer(text=f"By {ctx.author.display_name}")
         await ctx.send(embed=embed)
 
-    # ── /resetalltime ────────────────────────────────────────────────────────
+    # ── !resetalltime ────────────────────────────────────────────────────────
 
     @commands.command(name="resetalltime")
     @is_admin()
     async def reset_all_time(self, ctx):
         """
-        ☢️ NUCLEAR: Permanently delete ALL solves ever for this server.
-        /resetalltime
+        NUCLEAR: Permanently delete ALL solves ever for this server.
+        !resetalltime
         """
         phrase = f"CONFIRM WIPE {ctx.author.name}"
         embed = discord.Embed(
@@ -217,15 +217,15 @@ class Reset(commands.Cog):
         embed.set_footer(text=f"By {ctx.author.display_name}")
         await ctx.send(embed=embed)
 
-    # ── /resetuser ───────────────────────────────────────────────────────────
+    # ── !resetuser ───────────────────────────────────────────────────────────
 
     @commands.command(name="resetuser")
     @is_admin()
     async def reset_user(self, ctx, member: discord.Member = None, scope: str = "week"):
         """
         Reset a specific member's solves.
-        /resetuser @user week    — this week's solves
-        /resetuser @user all     — all-time solves
+        !resetuser @user week    — this week's solves
+        !resetuser @user all     — all-time solves
         """
         if not member:
             embed = discord.Embed(title="🔄  Reset User  —  Usage", color=COLOR_INFO)
@@ -274,15 +274,15 @@ class Reset(commands.Cog):
         embed.set_footer(text=f"By {ctx.author.display_name}")
         await ctx.send(embed=embed)
 
-    # ── /resetproblem ────────────────────────────────────────────────────────
+    # ── !resetproblem ────────────────────────────────────────────────────────
 
     @commands.command(name="resetproblem")
     @is_admin()
     async def reset_problem(self, ctx, db_id: int = None):
         """
         Un-mark all solves for a specific problem.
-        Members can re-earn points on next /check.
-        /resetproblem 42
+        Members can re-earn points on next !check.
+        !resetproblem 42
         """
         if db_id is None:
             await ctx.send("**Usage:** `!resetproblem <db_id>`  ·  Find IDs with `!problems`")
@@ -308,14 +308,14 @@ class Reset(commands.Cog):
         embed.set_footer(text=f"By {ctx.author.display_name}")
         await ctx.send(embed=embed)
 
-    # ── /resetweekfull ───────────────────────────────────────────────────────
+    # ── !resetweekfull ───────────────────────────────────────────────────────
 
     @commands.command(name="resetweekfull")
     @is_admin()
     async def reset_week_full(self, ctx):
         """
         Full reset: delete solves + problems + deactivate the current week.
-        /resetweekfull
+        !resetweekfull
         """
         pool = get_pool()
         async with pool.acquire() as conn:

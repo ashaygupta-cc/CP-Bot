@@ -332,8 +332,18 @@ async def get_weekly_leaderboard(conn, guild_id: str, week_id: int) -> list:
     )
 
 
-async def get_monthly_leaderboard(conn, guild_id: str, month_id: int) -> list:
-    """Points from problems whose month_id == month_id."""
+async def get_monthly_leaderboard(conn, guild_id: str, month_start: date, month_end: date) -> list:
+    """
+    Points from problems whose assigned_date falls within the month's date range.
+
+    NOTE: This intentionally does NOT filter on p.month_id. If a problem was
+    added with !addproblem before !setmonth was ever run (or before the
+    relevant month existed), month_id is stored as NULL on that row and it
+    would silently never show up on the monthly leaderboard even though
+    points were correctly awarded. Matching on the date range instead is
+    robust to that ordering issue and fixes already-affected rows without
+    any backfill/migration.
+    """
     return await conn.fetch(
         """
         SELECT s.discord_id,
@@ -341,11 +351,13 @@ async def get_monthly_leaderboard(conn, guild_id: str, month_id: int) -> list:
                COUNT(*) AS solved_count
         FROM solves s
         JOIN problems p ON p.id = s.problem_db_id
-        WHERE s.guild_id = $1 AND p.month_id = $2
+        WHERE s.guild_id = $1
+          AND p.assigned_date >= $2
+          AND p.assigned_date <= $3
         GROUP BY s.discord_id
         ORDER BY total DESC
         """,
-        guild_id, month_id,
+        guild_id, month_start, month_end,
     )
 
 
@@ -464,14 +476,24 @@ async def reset_current_week_solves(conn, guild_id: str) -> int:
 
 
 async def reset_current_month_solves(conn, guild_id: str) -> int:
+    """
+    Deletes solves for problems assigned within the active month's date range.
+    Uses assigned_date BETWEEN month.start_date AND month.end_date rather than
+    p.month_id — same reasoning as get_monthly_leaderboard: problems added
+    before !setmonth was run can have a NULL month_id and would otherwise be
+    silently skipped.
+    """
     result = await conn.execute(
         """
         DELETE FROM solves
         WHERE guild_id = $1
           AND problem_db_id IN (
               SELECT p.id FROM problems p
-              JOIN months m ON m.id = p.month_id
-              WHERE p.guild_id = $1 AND m.is_active = TRUE
+              JOIN months m ON m.guild_id = p.guild_id
+              WHERE p.guild_id = $1
+                AND m.is_active = TRUE
+                AND p.assigned_date >= m.start_date
+                AND p.assigned_date <= m.end_date
           )
         """,
         guild_id,

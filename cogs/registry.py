@@ -1,7 +1,6 @@
 """
 cogs/registry.py
-Commands: /register, /unregister, /profile, /handles
-v2: Professional embed layout
+Commands: !register, !unregister, !profile, !handles
 """
 
 import discord
@@ -24,7 +23,7 @@ class Registry(commands.Cog):
     async def register(self, ctx, platform: str = None, handle: str = None):
         """
         Link your CP handle.
-        /register cf tourist
+        !register cf tourist
         """
         if not platform or not handle:
             embed = discord.Embed(title="📝  Register Handle  —  Usage", color=COLOR_INFO)
@@ -62,7 +61,7 @@ class Registry(commands.Cog):
 
     @commands.command(name="unregister")
     async def unregister(self, ctx, platform: str = None):
-        """/unregister cf"""
+        """!unregister cf"""
         if not platform or not P.get(platform):
             await ctx.send(f"Usage: `!unregister <platform>`  ·  Supported: {P.choices_str()}")
             return
@@ -81,7 +80,7 @@ class Registry(commands.Cog):
 
     @commands.command(name="profile")
     async def profile(self, ctx, member: discord.Member = None):
-        """/profile [@user]"""
+        """!profile [@user]"""
         target = member or ctx.author
         pool   = get_pool()
 
@@ -131,7 +130,7 @@ class Registry(commands.Cog):
 
     @commands.command(name="handles")
     async def handles(self, ctx, platform: str = None):
-        """/handles [platform]"""
+        """!handles [platform]"""
         pool = get_pool()
         async with pool.acquire() as conn:
             if platform:

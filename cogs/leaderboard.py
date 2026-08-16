@@ -30,15 +30,15 @@ async def _build_board(rows: list, guild: discord.Guild, title: str, color: int,
         return embed
 
     lines = []
-    for rank, row in enumerate(rows[:10]):
+    for rank, row in enumerate(rows[:3]):
         member = guild.get_member(int(row["discord_id"]))
         name   = member.display_name if member else "*(Left server)*"
         solved = row.get("solved_count", 0)
         lines.append(_rank_line(rank, name, row["total"], solved))
 
     embed.description = "\n\n".join(lines)
-    if len(rows) > 10:
-        embed.description += f"\n\n*+{len(rows)-10} more participants*"
+    if len(rows) > 3:
+        embed.description += f"\n\n*+{len(rows)-3} more participants*"
     embed.set_footer(text=footer)
     return embed
 
@@ -64,7 +64,10 @@ class Leaderboard(commands.Cog):
 
             daily_rows   = await q.get_daily_leaderboard(conn, guild_id, today)
             weekly_rows  = await q.get_weekly_leaderboard(conn, guild_id, week["id"]) if week else []
-            monthly_rows = await q.get_monthly_leaderboard(conn, guild_id, month["id"]) if month else []
+            monthly_rows = (
+                await q.get_monthly_leaderboard(conn, guild_id, month["start_date"], month["end_date"])
+                if month else []
+            )
 
         # ── Daily ──────────────────────────────────────────────────────────
         daily_embed = await _build_board(

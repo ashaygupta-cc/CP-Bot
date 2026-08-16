@@ -1,7 +1,6 @@
 """
 cogs/submissions.py
-Command: /submissions [platform] [count] [@user]
-v2: professional embed, uses / prefix
+Command: !submissions [platform] [count] [@user]
 """
 
 import discord
@@ -30,8 +29,8 @@ class Submissions(commands.Cog):
                           count: int = 10, member: discord.Member = None):
         """
         Show recent submissions.
-        /submissions cf
-        /submissions lc 5 @friend
+        !submissions cf
+        !submissions lc 5 @friend
         """
         target = member or ctx.author
 
