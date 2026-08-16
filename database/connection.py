@@ -1,6 +1,17 @@
 """
 database/connection.py — asyncpg connection pool.
 Call init_pool() once at startup; use get_pool() everywhere else.
+
+FIX: statement_cache_size=0
+  Supabase uses PgBouncer in transaction pool mode. asyncpg by default
+  caches prepared statements per connection, but PgBouncer can route
+  different transactions to different backend connections — so a prepared
+  statement created on connection A doesn't exist on connection B,
+  causing:
+      prepared statement "__asyncpg_stmt_5__" already exists
+  Setting statement_cache_size=0 disables this cache. asyncpg sends
+  plain queries instead — fully PgBouncer-compatible, negligible overhead
+  for a Discord bot.
 """
 
 import asyncpg
@@ -16,6 +27,7 @@ async def init_pool() -> asyncpg.Pool:
         min_size=2,
         max_size=10,
         command_timeout=30,
+        statement_cache_size=0,   # Required for Supabase/PgBouncer transaction mode
     )
     return _pool
 

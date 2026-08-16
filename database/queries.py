@@ -665,3 +665,32 @@ async def reset_week_and_problems(conn, guild_id: str) -> dict:
     )
     await conn.execute("UPDATE weeks SET is_active = FALSE WHERE id = $1", week_id)
     return {"solves": int(r1.split()[-1]), "problems": int(r2.split()[-1]), "week_id": week_id}
+
+# ══════════════════════════════════════════════════════════════
+#  BOT CONFIG  (generic key/value store — used by !setcookie)
+# ══════════════════════════════════════════════════════════════
+
+async def get_config(conn, key: str) -> str | None:
+    """Return the stored value for `key`, or None if not set."""
+    row = await conn.fetchrow("SELECT value FROM bot_config WHERE key = $1", key)
+    return row["value"] if row else None
+
+
+async def set_config(conn, key: str, value: str, updated_by: str):
+    """Insert or overwrite a config value. No data loss — old value is replaced,
+    never deleted as a row (so `updated_at` always reflects the latest write)."""
+    await conn.execute(
+        """
+        INSERT INTO bot_config (key, value, updated_by, updated_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = NOW()
+        """,
+        key, value, updated_by,
+    )
+
+
+async def delete_config(conn, key: str):
+    await conn.execute("DELETE FROM bot_config WHERE key = $1", key)

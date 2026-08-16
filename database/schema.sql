@@ -3,6 +3,13 @@
 --  Run this ONCE in the Supabase SQL Editor.
 --  If upgrading from v1, run only the ALTER/CREATE sections
 --  marked with "-- v2 NEW".
+--
+--  v2.1 NEW: bot_config table (for !setcookie / AtCoder session).
+--  This is a brand-new, separate table. It does NOT alter, rename,
+--  or drop any existing table or column, so re-running this whole
+--  file on an existing database is 100% safe — every statement is
+--  CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS, so
+--  nothing that already exists gets touched and ZERO data is lost.
 -- ============================================================
 
 -- Discord users
@@ -90,6 +97,17 @@ CREATE TABLE IF NOT EXISTS point_adjustments (
     reason      TEXT,
     adjusted_by TEXT NOT NULL,          -- admin discord_id
     created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- v2.1 NEW: generic key/value bot config store.
+-- Used for !setcookie (stores the AtCoder REVEL_SESSION cookie value),
+-- and can hold any other small bot-wide setting in the future without
+-- ever needing another migration.
+CREATE TABLE IF NOT EXISTS bot_config (
+    key         TEXT PRIMARY KEY,
+    value       TEXT,
+    updated_by  TEXT,
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Indexes

@@ -219,7 +219,10 @@ class Checker(commands.Cog):
                 await ctx.send("❌  No active week.")
                 return
             probs = await q.get_problems_for_day(conn, str(ctx.guild.id), today)
-            users = await conn.fetch("SELECT DISTINCT discord_id FROM handles WHERE guild_id = $1", str(ctx.guild.id))
+            # NOTE: `handles` has no guild_id column (it's not guild-scoped) —
+            # we pull every registered handle and filter to this guild's
+            # members afterward via guild.get_member().
+            users = await conn.fetch("SELECT DISTINCT discord_id FROM handles")
 
         if not probs:
             await ctx.send(f"📭  No problems for today (`{today}`).")
@@ -449,9 +452,10 @@ class Checker(commands.Cog):
         total   = 0
 
         async with pool.acquire() as conn:
-            users = await conn.fetch(
-                "SELECT DISTINCT discord_id FROM handles WHERE guild_id = $1", guild_id
-            )
+            # NOTE: `handles` has no guild_id column (it's not guild-scoped) —
+            # we pull every registered handle and filter to this guild's
+            # members afterward via guild.get_member() in the loop below.
+            users = await conn.fetch("SELECT DISTINCT discord_id FROM handles")
 
         for i, row in enumerate(users):
             member = guild.get_member(int(row["discord_id"]))
