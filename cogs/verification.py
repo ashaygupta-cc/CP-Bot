@@ -38,6 +38,119 @@ from config import (
     VERIFICATION_ROLE_NAME, MEMBER_ROLE_NAME,
 )
 
+# Server branding
+SERVER_LOGO_URL = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats.webp"
+LINKEDIN_URL = "https://www.linkedin.com/company/binarybeatshq"
+INFO_CHANNEL_ID     = 1453508409864486912   # server info & guide
+TEAM_CHANNEL_ID     = 1433864900484009985   # team info
+BATTLES_CHANNEL_ID  = 1524890934095904920   # multiplayer CP/DSA battles
+INTRO_CHANNEL_ID    = 1433862268483014667   # introduce yourself
+
+# Welcome webhook identity — the message in #welcome shows this name and avatar
+# instead of the bot's own name.
+ZODIAC_NAME   = "Zodiac"
+ZODIAC_AVATAR = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Zodiac_Z408.png"
+
+# Cyan accent for the embed's left edge (matches duels / problems / registry).
+CLR_MATCH = 0x00D9FF
+
+
+async def _zodiac_webhook(channel: discord.TextChannel) -> discord.Webhook | None:
+    """Get-or-create a webhook that posts welcome messages as 'Zodiac' with
+    the Zodiac avatar. Returns None if the bot lacks Manage Webhooks — caller
+    then falls back to a normal channel send."""
+    try:
+        me = channel.guild.me
+        if me is None or not channel.permissions_for(me).manage_webhooks:
+            return None
+        for h in await channel.webhooks():
+            if h.name == ZODIAC_NAME and h.user and h.user.id == me.id:
+                return h
+        return await channel.create_webhook(
+            name=ZODIAC_NAME,
+            reason="Zodiac welcome identity",
+        )
+    except Exception as e:
+        print(f"[verification] webhook setup failed in #{channel.name}: {e}", flush=True)
+        return None
+
+
+async def _send_welcome(channel: discord.TextChannel, member: discord.Member):
+    """Post the welcome embed as 'Zodiac' via webhook if possible; fall back
+    to a normal send. No outer content — the embed already welcomes the user."""
+    embed = _make_welcome_embed(member)
+    wh = await _zodiac_webhook(channel)
+    if wh:
+        try:
+            await wh.send(
+                embed=embed,
+                username=ZODIAC_NAME,
+                avatar_url=ZODIAC_AVATAR,
+            )
+            return
+        except discord.HTTPException as e:
+            print(f"[verification] webhook send failed, falling back: {e}", flush=True)
+    await channel.send(embed=embed)
+
+
+async def _send_welcome_dm(member: discord.Member):
+    """DM a short onboarding guide to the new member. Silently no-ops if
+    the user has DMs closed — nothing to recover from."""
+    embed = discord.Embed(
+        title="Welcome to Binary Beats",
+        description=(
+            f"Glad to have you, {member.mention}. Take a patient **10 minutes** to look "
+            "around — this place is built for people who want to stay active.\n\n"
+            "**What's inside**\n"
+            "• Gamified CP / DSA / ICPC duels & blitz\n"
+            "• Matiks — competitive mental maths battles\n"
+            "• Daily problems + community leaderboards\n"
+            "• Structured roadmaps + curated 99-problem sets\n"
+            "• Community contests + live post-contest discussions\n\n"
+            "**Start here**\n"
+            f"• <#{INFO_CHANNEL_ID}>  —  server info & how it all works\n"
+            f"• <#{TEAM_CHANNEL_ID}>  —  meet the team\n"
+            f"• <#{BATTLES_CHANNEL_ID}>  —  multiplayer CP/DSA battles\n"
+            f"• <#{INTRO_CHANNEL_ID}>  —  introduce yourself\n\n"
+            "**One tip** — open *Channels & Roles* at the top of the server and "
+            "follow the ones that look useful. Unfollowed channels won't show updates."
+        ),
+        color=CLR_MATCH,
+    )
+    embed.set_author(name="Binary Beats", icon_url=SERVER_LOGO_URL)
+    embed.set_thumbnail(url=SERVER_LOGO_URL)
+    embed.set_footer(
+        text="Ashay (Zodiac), IIITV  ·  Binary Beats  ·  Code. Compete. Conquer.",
+    )
+
+    try:
+        await member.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException) as e:
+        # DMs closed, or Discord hiccup — not worth escalating.
+        print(f"[verification] could not DM welcome guide to {member}: {e}", flush=True)
+
+
+def _make_welcome_embed(member: discord.Member) -> discord.Embed:
+    """Polished, webhook-style welcome embed shown when a member joins."""
+    guild = member.guild
+
+    embed = discord.Embed(
+        description=(
+            f"**Welcome to Binary Beats, {member.mention}!**\n\n"
+            "We're glad to have you as part of the community. Before you dive in, "
+            f"take a moment to follow our page on [LinkedIn]({LINKEDIN_URL}) — "
+            "staying connected and active there is a great way to support the "
+            "community and stay in the loop with everything we do.\n\n"
+            f"Dive in and explore everything our community has to offer over at <#{INFO_CHANNEL_ID}>."
+        ),
+        color=CLR_MATCH,
+    )
+    embed.set_author(name=guild.name, icon_url=SERVER_LOGO_URL)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_footer(text="Zodiac (Ashay)\nFounder\nBinary Beats")
+    return embed
+
+
 # Seconds user must wait after clicking "Follow on LinkedIn"
 # before "I Have Followed" is accepted.
 FOLLOW_COOLDOWN = 10
@@ -143,18 +256,7 @@ class VerificationView(discord.ui.View):
 
         welcome_ch = discord.utils.get(guild.text_channels, name=WELCOME_CHANNEL)
         if welcome_ch:
-            embed = discord.Embed(
-                title="New member",
-                description=(
-                    f"{member.mention} has joined **{guild.name}**.\n\n"
-                    f"Use `!register` to link your competitive programming handles "
-                    f"and start tracking your progress."
-                ),
-                color=COLOR_SUCCESS,
-            )
-            embed.set_thumbnail(url=member.display_avatar.url)
-            embed.set_footer(text="Binary Beats — Competitive Programming Community")
-            await welcome_ch.send(embed=embed)
+            await _send_welcome(welcome_ch, member)
 
 
 def _make_verification_embed(guild: discord.Guild) -> discord.Embed:
@@ -195,20 +297,10 @@ class Verification(commands.Cog):
 
         welcome_ch = discord.utils.get(guild.text_channels, name=WELCOME_CHANNEL)
         if welcome_ch:
-            embed = discord.Embed(
-                title="New member",
-                description=(
-                    f"{member.mention} has joined **{guild.name}**.\n\n"
-                    f"Use `!register` to link your competitive programming handles "
-                    f"and start tracking your progress."
-                ),
-                color=COLOR_SUCCESS,
-            )
-            embed.set_thumbnail(url=member.display_avatar.url)
-            embed.set_footer(text="Binary Beats — Competitive Programming Community")
-            await welcome_ch.send(embed=embed)
+            await _send_welcome(welcome_ch, member)
 
-    @commands.command(name="sendverification", aliases=["sendverify"])
+        # Private onboarding guide — no-op if the user has DMs closed.
+        await _send_welcome_dm(member)
     async def send_verification(self, ctx):
         """(Admin) Manually post the verification prompt in the current channel."""
         if not (

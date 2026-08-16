@@ -68,6 +68,10 @@ BOT_LOGO   = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main
 BOT_BANNER = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats%20Banner.jpeg"
 BRAND      = "Binary Beats"
 WEBHOOK_NAME = "Z4s"
+# Outer webhook identity (avatar shown next to "Z4s" in chat, OUTSIDE the
+# embed) — deliberately different from BOT_LOGO, which stays used for the
+# icon INSIDE embeds (author icon / thumbnail / footer icon).
+WEBHOOK_AVATAR = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Zodiac_Z408.png"
 
 # Semantic palette — use these instead of raw hex in embeds
 CLR_MATCH   = 0x00D9FF   # cyan — active, challenges, info
@@ -124,6 +128,22 @@ FORFEIT_PENALTY = 32
 FORFEIT_REWARD  = 16
 DUEL_SECS_PER_PROBLEM = 1200   # duel total time = n × 20 min
 
+# Shown the instant a command is run (message itself is deleted immediately
+# for a clean channel), so the player gets feedback right away instead of
+# staring at an empty channel during the ~5s room-setup gap. Plain ANSI
+# text, no colored emoji, to match the countdown/VS-card look.
+STATUS_ROOM_CREATING = (
+    "```ansi\n\u001b[0;37m»  Setting up your match room — please wait ~5s…\u001b[0m\n```"
+)
+
+# Shown the INSTANT !duel/!blitz is run (before any validation/DB work),
+# so the channel never sits empty during the ~1-2s it takes to resolve the
+# opponent, fetch ratings, etc. Deleted the moment the real output (challenge
+# card, leaderboard, rank embed, or an error) is ready to appear.
+STATUS_RUNNING = (
+    "```ansi\n\u001b[0;37m»  Working on it…\u001b[0m\n```"
+)
+
 # Blitz per-problem timer scales with difficulty ordering, same rule for
 # CF and LC blitz alike (position in the sequence = difficulty rank):
 #   3-problem format → 15 min / 25 min / 35 min (easy → medium → hard)
@@ -158,6 +178,41 @@ def is_admin():
 
 def _is_duel_mode(mode: str) -> bool:
     return mode.endswith("_duel")
+
+
+_FAMILIES = {"cp", "dsa", "icpc"}
+
+
+def _parse_duel_args(args) -> tuple:
+    """
+    Parses the tokens after the opponent for the strict !duel / !blitz
+    syntax:  !duel <@user> <cp|dsa|icpc> [2|3]  (type is fixed by which
+    command was used — there's no override token anymore).
+
+    Accepts at most one family token (cp/dsa/icpc) and at most one format
+    token (2 or 3, defaults to 3 if omitted). Anything else — a second
+    conflicting family, a bad digit, a stray word — is an error.
+
+    Returns (family_or_None, format_num, error_message_or_None).
+    """
+    family = None
+    format_num = 3
+    for tok in args:
+        if not tok:
+            continue
+        t = tok.lower()
+        if t in _FAMILIES:
+            if family is not None and family != t:
+                return None, format_num, (
+                    f"Only one family allowed — got both `{family}` and `{t}`.")
+            family = t
+        elif t in ("2", "3"):
+            format_num = int(t)
+        else:
+            return None, format_num, (
+                f"Invalid input `{tok}`. Format must be `2` or `3` (defaults to `3` "
+                f"if left out) — nothing else is accepted there.")
+    return family, format_num, None
 
 
 def _fmt_secs(s: float) -> str:
@@ -221,24 +276,34 @@ def _problem_difficulty_display(prob: dict) -> str:
 
 class ChallengeView(discord.ui.View):
     def __init__(self, cog, ctx, challenger, opponent, mode, timeout_s, format_num=3):
-        super().__init__(timeout=timeout_s)
+        # +5s buffer over the visible countdown so our own countdown task
+        # (the actual source of truth for the auto-bot-match timeout) always
+        # finishes first; this timeout is just a safety net.
+        super().__init__(timeout=timeout_s + 5)
         self.cog, self.ctx = cog, ctx
         self.challenger, self.opponent, self.mode = challenger, opponent, mode
         self.format_num = format_num
         self.responded = False
         self.message: discord.Message | None = None
 
-    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.primary)
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.opponent.id:
             await interaction.response.send_message("Only the challenged player can respond.", ephemeral=True)
             return
         self.responded = True
         self.stop()
-        for c in self.children:
-            c.disabled = True
-        await interaction.response.edit_message(content="✅ **Accepted** — setting up the arena…", view=self)
-        await self.cog.begin_human_match(self.ctx, self.challenger, self.opponent, self.mode, self.format_num)
+        try:
+            await interaction.response.edit_message(content=STATUS_ROOM_CREATING, embed=None, view=None)
+        except Exception:
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
+        # begin_human_match clears/deletes this message itself once the
+        # room is live (or on failure) — same pattern as the bot-match path.
+        await self.cog.begin_human_match(self.ctx, self.challenger, self.opponent, self.mode,
+                                         self.format_num, status_msg=self.message)
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.secondary)
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -247,23 +312,83 @@ class ChallengeView(discord.ui.View):
             return
         self.responded = True
         self.stop()
-        for c in self.children:
-            c.disabled = True
-        await interaction.response.edit_message(content="Challenge declined.", view=self)
-        await self.cog.offer_bot_fallback(interaction.channel, self.challenger, self.mode)
-
-    async def on_timeout(self):
-        if self.responded:
-            return
-        for c in self.children:
-            c.disabled = True
+        try:
+            await interaction.response.edit_message(
+                content="```ansi\n\u001b[1;31m»  Rejected.\u001b[0m\n```", embed=None, view=None)
+        except Exception:
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
+        await asyncio.sleep(2)
         try:
             if self.message:
-                await self.message.edit(content="Challenge expired — no response.", view=self)
+                await self.message.delete()
         except Exception:
             pass
+        try:
+            status_msg = await self.cog._run_automatch_sequence(interaction.channel)
+            await self.cog._auto_bot_fallback(self.ctx, self.challenger, self.mode, self.format_num,
+                                              status_msg=status_msg)
+        except Exception as e:
+            print(f"[DUEL_CMD] ❌ auto-matchmaking after decline failed: {type(e).__name__}: {e}", flush=True)
+            import traceback; traceback.print_exc()
+            asyncio.create_task(self.cog._send_self_destruct(
+                interaction.channel,
+                f"❌ Auto-matchmaking with {WEBHOOK_NAME} failed to start. "
+                f"Try `!{'blitz' if self.mode.endswith('_blitz') else 'duel'} "
+                f"@user {self.mode.split('_')[0]} {self.format_num}` again."))
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.challenger.id:
+            await interaction.response.send_message("Only the challenger can cancel this.", ephemeral=True)
+            return
+        self.responded = True
+        self.stop()
+        try:
+            await interaction.response.edit_message(content="❌ Match cancelled.", embed=None, view=None)
+        except Exception:
+            pass
+        await asyncio.sleep(4)
+        try:
+            if self.message:
+                await self.message.delete()
+        except Exception:
+            pass
+
+    async def on_timeout(self):
+        # Third safety net. The real "no response" path is driven by
+        # Duels._run_challenge_countdown, which finishes first (timeout_s)
+        # and normally handles everything, including automatch. This fires
+        # timeout_s + 5s later and should almost never see responded=False —
+        # but if it ever does (countdown task never got scheduled, event
+        # loop hiccup, etc.), it must still trigger the bot match itself
+        # rather than just deleting the card and leaving the player stuck.
+        if self.responded:
+            return
+        self.responded = True
+        try:
+            if self.message:
+                await self.message.delete()
+        except Exception:
+            pass
+        print(f"[DUEL_CMD] ⚠️ ChallengeView built-in timeout fired with no response recorded "
+              f"— countdown task likely never ran. Triggering emergency automatch for "
+              f"{self.challenger.name} vs bot mode={self.mode}", flush=True)
         channel = self.message.channel if self.message else self.ctx.channel
-        await self.cog.offer_bot_fallback(channel, self.challenger, self.mode)
+        try:
+            status_msg = await self.cog._run_automatch_sequence(channel)
+            await self.cog._auto_bot_fallback(self.ctx, self.challenger, self.mode,
+                                              self.format_num, status_msg=status_msg)
+        except Exception as e:
+            print(f"[DUEL_CMD] ❌ emergency automatch (on_timeout) failed: "
+                  f"{type(e).__name__}: {e}", flush=True)
+            asyncio.create_task(self.cog._send_self_destruct(
+                channel,
+                f"❌ Auto-matchmaking with {WEBHOOK_NAME} failed to start. "
+                f"Try `!{'blitz' if self.mode.endswith('_blitz') else 'duel'} "
+                f"@user {self.mode.split('_')[0]} {self.format_num}` again."))
 
 
 class SubmissionCheckerView(discord.ui.View):
@@ -445,7 +570,7 @@ class Duels(commands.Cog):
             try:
                 return await wh.send(
                     content=content, embed=embed,
-                    username=WEBHOOK_NAME, avatar_url=BOT_LOGO,
+                    username=WEBHOOK_NAME, avatar_url=WEBHOOK_AVATAR,
                     wait=True, **kwargs)
             except Exception as e:
                 print(f"[WEBHOOK] Send failed, fallback: {e}", flush=True)
@@ -498,10 +623,44 @@ class Duels(commands.Cog):
     def _cd_frame(self, n: int) -> str:
         art = self._CD_ART.get(n, "") if n > 0 else self._CD_GO
         lines = art.split("\n")
-        w = max(len(l) for l in lines)
-        pad = max(w + 6, 18)
+        # Normalize every line to the glyph's own width FIRST (left-aligned),
+        # so the digit's internal shape stays intact. Centering each raw
+        # line independently (old behavior) shifted short lines (e.g. the
+        # "██" stroke in 2/5/6) toward the middle on their own, breaking
+        # the glyph apart from the lines above/below it.
+        glyph_w = max(len(l) for l in lines)
+        lines = [l.ljust(glyph_w) for l in lines]
+        pad = max(glyph_w + 6, 18)
         centered = "\n".join(l.center(pad) for l in lines)
         return f"```ansi\n\u001b[1;36m{centered}\u001b[0m\n```"
+
+    # Max characters per VS-card line. Kept narrow on purpose — long lines
+    # in a fixed-width ``` code block wrap on mobile (Discord's mobile
+    # renderer has far less width than desktop), which is what breaks the
+    # box on phone even though it looks fine on laptop.
+    _VS_MAX_W = 30
+    _VS_NAME_MAX = 12
+
+    def _vs_trim(self, name: str) -> str:
+        return name if len(name) <= self._VS_NAME_MAX else name[: self._VS_NAME_MAX - 1] + "…"
+
+    def _vs_card(self, p1_name: str, p2_name: str,
+                p1_rank: dict, p1_rating: dict, p2_rank: dict, p2_rating: dict) -> str:
+        """Build a vertical VS card — stacked top-to-bottom so it never
+        wraps on mobile.  Centered inside a ``` code block."""
+        p1n, p2n = self._vs_trim(p1_name), self._vs_trim(p2_name)
+        lines = [
+            p1n,
+            f"{p1_rank['name']} · {p1_rating['rating']}",
+            "",
+            "VS",
+            "",
+            f"{p2_rank['name']} · {p2_rating['rating']}",
+            p2n,
+        ]
+        w = max(len(l) for l in lines) + 4
+        centered = "\n".join(l.center(w) for l in lines)
+        return f"```\n{centered}\n```"
 
     async def _run_countdown(self, channel, seconds: int = 7):
         """Animated ASCII art countdown above the match card."""
@@ -528,117 +687,369 @@ class Duels(commands.Cog):
 
     # ── Commands ───────────────────────────────────────────────────────────
 
-    @commands.command(name="duel", help="Challenge a player or bot to a duel.")
-    async def duel_cmd(self, ctx, opponent_str: str, mode: str,
-                       format_or_rating: str = None, rating_str: str = None):
+    @commands.command(name="duel", help="Challenge a player, or check duel leaderboard/rank.")
+    async def duel_cmd(self, ctx, *args):
         """
-        !duel @user cp_blitz              Challenge a player (3-problem)
-        !duel @user cp_duel 2             Challenge a player (2-problem)
-        !duel bot cp_blitz                Bot at your rating (3 problems)
-        !duel bot cp_duel 2 1600          Bot, 2 problems, rating 1600
+        Challenge a player:
+          !duel @user cp                    DUEL mode, 3-problem (default)
+          !duel @user cp 2                  DUEL mode, 2-problem
+          !duel @user cp 3                  DUEL mode, 3-problem (explicit)
+
+        Leaderboard / rank (family optional, any order with the keyword):
+          !duel leaderboard                 Top players, CP DUEL (default family)
+          !duel cp leaderboard              Top players, CP DUEL
+          !duel dsa leaderboard             Top players, DSA DUEL
+          !duel leaderboard icpc            Same as above — order doesn't matter
+          !duel rank                        Your rank across ALL duel modes
+          !duel cp rank                     Your rank, CP DUEL only
+
+        !duel always means DUEL mode — use !blitz for BLITZ mode instead.
+        Format is optional and defaults to 3 if left out; if given, only
+        `2` or `3` are valid.
         """
-        print(f"[DUEL_CMD] opponent={opponent_str} mode={mode} a3={format_or_rating} a4={rating_str}", flush=True)
-        # Delete the command message for a clean channel
+        await self._duel_or_blitz_entry(ctx, args, default_mtype="duel")
+
+    @commands.command(name="blitz", help="Challenge a player, or check blitz leaderboard/rank.")
+    async def blitz_cmd(self, ctx, *args):
+        """
+        Challenge a player:
+          !blitz @user cp                   BLITZ mode, 3-problem (default)
+          !blitz @user cp 2                 BLITZ mode, 2-problem
+          !blitz @user cp 3                 BLITZ mode, 3-problem (explicit)
+
+        Leaderboard / rank (family optional, any order with the keyword):
+          !blitz leaderboard                Top players, CP BLITZ (default family)
+          !blitz cp leaderboard             Top players, CP BLITZ
+          !blitz dsa leaderboard            Top players, DSA BLITZ
+          !blitz leaderboard icpc           Same as above — order doesn't matter
+          !blitz rank                       Your rank across ALL blitz modes
+          !blitz cp rank                    Your rank, CP BLITZ only
+
+        !blitz always means BLITZ mode — use !duel for DUEL mode instead.
+        Format is optional and defaults to 3 if left out; if given, only
+        `2` or `3` are valid.
+        """
+        await self._duel_or_blitz_entry(ctx, args, default_mtype="blitz")
+
+    async def _send_status_running(self, channel):
+        """Instant feedback the moment a !duel/!blitz command is parsed —
+        sent before any validation/DB work so the channel never looks idle
+        during the ~1-2s that takes. Caller clears it via _clear_status
+        right before the real output (embed or error) appears."""
+        try:
+            return await channel.send(STATUS_RUNNING)
+        except Exception:
+            return None
+
+    async def _clear_status(self, status_msg):
+        if not status_msg:
+            return
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+    def _resolve_mode_channel(self, guild, mode: str):
+        """Resolves config.DUEL_MODE_CHANNELS[mode] (a channel ID or channel
+        name string, or "" if unset) to an actual channel object in this
+        guild. Returns None if unset or not found."""
+        configured = config.DUEL_MODE_CHANNELS.get(mode, "")
+        if not configured:
+            return None
+        if configured.isdigit():
+            return guild.get_channel(int(configured))
+        return discord.utils.get(guild.text_channels, name=configured)
+
+    def _mode_for_channel(self, channel) -> str | None:
+        """Returns the exact mode (e.g. "cp_duel") this channel is
+        dedicated to per config.DUEL_MODE_CHANNELS, or None if this channel
+        isn't reserved for any specific mode (unrestricted, e.g. a match
+        room or #general)."""
+        configured_map = config.DUEL_MODE_CHANNELS
+        cid = str(getattr(channel, "id", ""))
+        cname = getattr(channel, "name", None)
+        for mode, configured in configured_map.items():
+            if not configured:
+                continue
+            if configured.isdigit():
+                if configured == cid:
+                    return mode
+            elif configured == cname:
+                return mode
+        return None
+
+    async def _reject_wrong_mode_channel(self, ctx, mode: str, status_msg=None) -> bool:
+        """If ctx.channel is dedicated to a DIFFERENT mode than `mode`
+        (per config.DUEL_MODE_CHANNELS), sends a self-destructing error
+        pointing to the right channel and returns True (caller should
+        stop). A channel not reserved for any specific mode is
+        unrestricted, so this only fires inside a mismatched dedicated
+        channel — e.g. running a `dsa` command in the channel configured
+        for cp_duel, or a `cp_blitz` command in the channel configured for
+        cp_duel."""
+        channel_mode = self._mode_for_channel(ctx.channel)
+        if channel_mode is None or channel_mode == mode:
+            return False
+        await self._clear_status(status_msg)
+        right_chan = self._resolve_mode_channel(ctx.guild, mode)
+        where = right_chan.mention if right_chan else f"the **{MODES[mode]['label']}** channel"
+        asyncio.create_task(self._send_self_destruct(ctx.channel,
+            f"❌ This channel is reserved for **{MODES[channel_mode]['label']}** — "
+            f"use {where} for {MODES[mode]['label']} instead."))
+        return True
+
+    async def _duel_or_blitz_entry(self, ctx, args, default_mtype: str):
+        """Entry point shared by !duel and !blitz — routes to either the
+        challenge flow or the leaderboard/rank subcommand based on whether
+        a `leaderboard`/`rank` keyword is present anywhere in the args."""
         try:
             await ctx.message.delete()
         except Exception:
             pass
-        mode = mode.lower()
-        if mode not in MODES:
-            await ctx.send(f"Unknown mode. Available: {', '.join(MODES.keys())}")
+
+        # Instant placeholder — shown before we've even parsed the args,
+        # cleared by whichever branch below produces the real output.
+        status_msg = await self._send_status_running(ctx.channel)
+
+        cmd_name = "duel" if default_mtype == "duel" else "blitz"
+        lower_args = [a.lower() for a in args]
+
+        if "leaderboard" in lower_args or "rank" in lower_args:
+            await self._duel_stats_cmd(ctx, args, default_mtype, status_msg=status_msg)
             return
 
-        format_num = 3
-        bot_rating_override = None
-        if format_or_rating:
-            if format_or_rating in ("2", "3"):
-                format_num = int(format_or_rating)
-                bot_rating_override = rating_str
+        if not args:
+            await self._clear_status(status_msg)
+            asyncio.create_task(self._send_self_destruct(ctx.channel,
+                f"❌ Missing opponent. Usage: `!{cmd_name} <@user> <cp|dsa|icpc> [2|3]` "
+                f"or `!{cmd_name} [cp|dsa|icpc] leaderboard|rank`"))
+            return
+
+        opponent_str, *rest = args
+        await self._duel_or_blitz(ctx, opponent_str, rest, default_mtype, status_msg=status_msg)
+
+    async def _duel_stats_cmd(self, ctx, args, default_mtype: str, status_msg=None):
+        """Handles `!duel/!blitz [cp|dsa|icpc] leaderboard|rank` — family and
+        the keyword can appear in any order; family is optional."""
+        cmd_name = "duel" if default_mtype == "duel" else "blitz"
+        keyword = "leaderboard" if any(a.lower() == "leaderboard" for a in args) else "rank"
+
+        family = None
+        for tok in args:
+            t = tok.lower()
+            if t in ("leaderboard", "rank"):
+                continue
+            if t in _FAMILIES:
+                if family is not None and family != t:
+                    await self._clear_status(status_msg)
+                    asyncio.create_task(self._send_self_destruct(ctx.channel,
+                        f"❌ Only one family allowed — got both `{family}` and `{t}`."))
+                    return
+                family = t
             else:
-                bot_rating_override = format_or_rating
+                await self._clear_status(status_msg)
+                asyncio.create_task(self._send_self_destruct(ctx.channel,
+                    f"❌ Invalid input `{tok}`. Usage: `!{cmd_name} [cp|dsa|icpc] {keyword}`"))
+                return
+
+        channel_mode = self._mode_for_channel(ctx.channel)
+        if not family and channel_mode:
+            # No family given, but we're in a channel dedicated to a
+            # specific mode — default to its family instead of hardcoding
+            # 'cp'/all. If that ends up being the wrong duel/blitz type for
+            # this channel (e.g. channel is cp_blitz but this is !duel),
+            # the check right below still catches it.
+            family = MODES[channel_mode]["family"]
+
+        if family:
+            mode = f"{family}_{default_mtype}"
+            if await self._reject_wrong_mode_channel(ctx, mode, status_msg=status_msg):
+                return
+
+        if keyword == "leaderboard":
+            mode = f"{(family or 'cp')}_{default_mtype}"
+            await self._show_leaderboard(ctx, mode, status_msg=status_msg)
+        else:
+            if family:
+                modes_to_check = [f"{family}_{default_mtype}"]
+            else:
+                modes_to_check = [m for m in MODES if m.endswith(f"_{default_mtype}")]
+            await self._show_rank(ctx, modes_to_check, status_msg=status_msg)
+
+    async def _show_rank(self, ctx, modes_to_check: list, status_msg=None):
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            profile = await dq.get_profile(conn, str(ctx.author.id), str(ctx.guild.id))
+        em = _brand(f"__{ctx.author.name}__", color=CLR_MATCH, thumb=False)
+        em.description = "Current ranks"
+        em.timestamp = datetime.now(timezone.utc)
+        for row in profile:
+            if row["mode"] not in modes_to_check:
+                continue
+            rank_info = duel_ranks.get_rank(row["rating"])
+            em.add_field(name=f"__{MODES[row['mode']]['label']}__",
+                         value=f"**{rank_info['name']}** · `{row['rating']}`", inline=True)
+        em.set_footer(text=BRAND, icon_url=BOT_LOGO)
+        await self._clear_status(status_msg)
+        await ctx.send(embed=em)
+
+    async def _show_leaderboard(self, ctx, mode: str, status_msg=None):
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await dq.get_leaderboard(conn, str(ctx.guild.id), mode, limit=10)
+        em = _brand(f"__Leaderboard — {MODES[mode]['label']}__", color=CLR_MATCH, thumb=False)
+        em.timestamp = datetime.now(timezone.utc)
+        if not rows:
+            em.description = "No players yet."
+            await self._clear_status(status_msg)
+            await ctx.send(embed=em)
+            return
+        lines = []
+        for i, row in enumerate(rows, 1):
+            user = self.bot.get_user(int(row["discord_id"])) if row["discord_id"].isdigit() else None
+            name = user.display_name if user else f"User {row['discord_id']}"
+            rank_info = duel_ranks.get_rank(row["rating"])
+            record = f"`{row['wins']}W` `{row['losses']}L` `{row['draws']}D`"
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"`{i}.`")
+            lines.append(f"{medal} **{name}** — {rank_info['name']} · `{row['rating']}`\n  {record}")
+        em.description = "\n\n".join(lines)
+        em.set_footer(text=BRAND, icon_url=BOT_LOGO)
+        await self._clear_status(status_msg)
+        await ctx.send(embed=em)
+
+    async def _duel_or_blitz(self, ctx, opponent_str: str, args, default_mtype: str, status_msg=None):
+        """Challenge flow behind !duel and !blitz (invoked from _duel_or_blitz_entry
+        once we know this isn't a leaderboard/rank call).
+
+        `status_msg` is the instant "Working on it…" placeholder sent by the
+        entry point the moment the command fired — it's cleared right before
+        the real output (an error, or the challenge card) appears, so the
+        channel never sits empty during validation/DB lookups.
+        """
+        print(f"[DUEL_CMD] opponent={opponent_str} args={args} default_mtype={default_mtype}", flush=True)
+
+        cmd_name = "duel" if default_mtype == "duel" else "blitz"
+
+        family, format_num, parse_err = _parse_duel_args(args)
+        if parse_err:
+            await self._clear_status(status_msg)
+            asyncio.create_task(self._send_self_destruct(ctx.channel,
+                f"❌ {parse_err}\nUsage: `!{cmd_name} <@user> <cp|dsa|icpc> [2|3]`"))
+            return
+        if not family:
+            await self._clear_status(status_msg)
+            asyncio.create_task(self._send_self_destruct(ctx.channel,
+                f"❌ Missing family. Usage: `!{cmd_name} <@user> <cp|dsa|icpc> [2|3]`"))
+            return
+
+        mode = f"{family}_{default_mtype}"
+
+        if await self._reject_wrong_mode_channel(ctx, mode, status_msg=status_msg):
+            return
 
         pool = get_pool()
         async with pool.acquire() as conn:
             cfg = await dq.get_duel_config(conn, str(ctx.guild.id))
             author_busy = await self._active_duel_for_user(conn, str(ctx.guild.id), str(ctx.author.id))
         if author_busy:
-            await ctx.send(await self._busy_message(author_busy, "You"))
+            await self._clear_status(status_msg)
+            asyncio.create_task(self._send_self_destruct(
+                ctx.channel, await self._busy_message(author_busy, "You")))
             return
 
         if opponent_str.lower() == "bot":
-            fallback_rating = await self._get_or_create_duel_rating(ctx.author, ctx.guild, mode)
-            bot_rating = botengine.resolve_bot_rating(bot_rating_override, fallback_rating["rating"])
-            await self.begin_bot_match(ctx, ctx.author, None, mode, bot_rating, format_num)
+            await self._clear_status(status_msg)
+            asyncio.create_task(self._send_self_destruct(ctx.channel,
+                "You can't manually start a bot match anymore — just challenge a "
+                f"player: `!{'blitz' if default_mtype == 'blitz' else 'duel'} @user <cp|dsa|icpc> [2|3]`. "
+                "If they don't respond in time, you're auto-matched against the bot."))
+            return
+
+        try:
+            opponent = await commands.MemberConverter().convert(ctx, opponent_str)
+        except commands.BadArgument:
+            await self._clear_status(status_msg)
+            asyncio.create_task(self._send_self_destruct(
+                ctx.channel, f"Couldn't find player {opponent_str}."))
+            return
+        if opponent.id == ctx.author.id:
+            await self._clear_status(status_msg)
+            asyncio.create_task(self._send_self_destruct(ctx.channel, "You can't duel yourself."))
+            return
+        if opponent.bot:
+            await self._clear_status(status_msg)
+            asyncio.create_task(self._send_self_destruct(ctx.channel,
+                "You can't challenge a bot account directly — challenge a player instead. "
+                "If they don't respond in time, you're auto-matched against the bot."))
+            return
+
+        async with pool.acquire() as conn:
+            opp_busy = await self._active_duel_for_user(conn, str(ctx.guild.id), str(opponent.id))
+        if opp_busy:
+            await self._clear_status(status_msg)
+            asyncio.create_task(self._send_self_destruct(
+                ctx.channel, await self._busy_message(opp_busy, opponent.mention)))
+            return
+
+        challenge_timeout = int(cfg.get("challenge_timeout", 15))
+
+        # ── Fetch ratings for display ──
+        p1r = await self._get_or_create_duel_rating(ctx.author, ctx.guild, mode)
+        p2r = await self._get_or_create_duel_rating(opponent, ctx.guild, mode)
+        p1_rank = duel_ranks.get_rank(p1r["rating"])
+        p2_rank = duel_ranks.get_rank(p2r["rating"])
+
+        em = _brand("__Duel Challenge__", color=CLR_MATCH, banner=True)
+
+        if _is_duel_mode(mode):
+            total_min = format_num * DUEL_SECS_PER_PROBLEM // 60
+            fmt_desc = (
+                f"{MODE_BLURB[mode]} · **{total_min} min** total\n"
+                f"Solve in order — next problem unlocks\n"
+                f"when you finish the current one.")
         else:
-            try:
-                opponent = await commands.MemberConverter().convert(ctx, opponent_str)
-            except commands.BadArgument:
-                await ctx.send(f"Couldn't find player {opponent_str}.")
-                return
-            if opponent.id == ctx.author.id:
-                await ctx.send("You can't duel yourself.")
-                return
-            if opponent.bot:
-                await ctx.send("To challenge the bot, use `!duel bot <mode>`.")
-                return
+            fmt_desc = (
+                f"{MODE_BLURB[mode]} · one problem at a time\n"
+                f"First verified solve takes each problem.")
 
-            async with pool.acquire() as conn:
-                opp_busy = await self._active_duel_for_user(conn, str(ctx.guild.id), str(opponent.id))
-            if opp_busy:
-                await ctx.send(await self._busy_message(opp_busy, opponent.mention))
-                return
+        em.description = (
+            f"**{MODES[mode]['label']}** · **{format_num}**-Problem Format\n\n"
+            f"{fmt_desc}")
 
-            challenge_timeout = int(cfg.get("challenge_timeout", 90))
+        em.add_field(
+            name="__Challenger__",
+            value=f"{ctx.author.mention}\n**{p1_rank['name']}** · `{p1r['rating']}`",
+            inline=True)
+        em.add_field(
+            name="__Opponent__",
+            value=f"{opponent.mention}\n**{p2_rank['name']}** · `{p2r['rating']}`",
+            inline=True)
+        em.set_footer(
+            text=f"Only {opponent.name} can Accept/Decline · You can Cancel · "
+                 f"No response in {challenge_timeout}s → auto-match vs {WEBHOOK_NAME}",
+            icon_url=BOT_LOGO)
 
-            # ── Fetch ratings for display ──
-            p1r = await self._get_or_create_duel_rating(ctx.author, ctx.guild, mode)
-            p2r = await self._get_or_create_duel_rating(opponent, ctx.guild, mode)
-            p1_rank = duel_ranks.get_rank(p1r["rating"])
-            p2_rank = duel_ranks.get_rank(p2r["rating"])
+        await self._clear_status(status_msg)
+        view = ChallengeView(self, ctx, ctx.author, opponent, mode, challenge_timeout, format_num)
+        view.message = await ctx.send(embed=em, view=view)
+        asyncio.create_task(self._run_challenge_countdown(view, challenge_timeout))
 
-            em = _brand("__Duel Challenge__", color=CLR_MATCH, banner=True)
-
-            if _is_duel_mode(mode):
-                total_min = format_num * DUEL_SECS_PER_PROBLEM // 60
-                fmt_desc = (
-                    f"{MODE_BLURB[mode]} · **{total_min} min** total\n"
-                    f"Solve in order — next problem unlocks\n"
-                    f"when you finish the current one.")
-            else:
-                fmt_desc = (
-                    f"{MODE_BLURB[mode]} · one problem at a time\n"
-                    f"First verified solve takes each problem.")
-
-            em.description = (
-                f"**{MODES[mode]['label']}** · **{format_num}**-Problem Format\n\n"
-                f"{fmt_desc}")
-
-            em.add_field(
-                name="__Challenger__",
-                value=f"{ctx.author.mention}\n**{p1_rank['name']}** · `{p1r['rating']}`",
-                inline=True)
-            em.add_field(
-                name="__Opponent__",
-                value=f"{opponent.mention}\n**{p2_rank['name']}** · `{p2r['rating']}`",
-                inline=True)
-            em.set_footer(
-                text=f"Only {opponent.name} can accept/decline · Expires in {challenge_timeout}s",
-                icon_url=BOT_LOGO)
-
-            view = ChallengeView(self, ctx, ctx.author, opponent, mode, challenge_timeout, format_num)
-            view.message = await ctx.send(embed=em, view=view)
-
-    @commands.command(name="duelprofile", help="View your or someone's duel ratings.")
-    async def duel_profile(self, ctx, user: discord.User = None):
+    async def _profile_cmd(self, ctx, user, mtype: str):
+        """Shared body for !duelprofile / !blitzprofile — shows only the
+        cp/dsa/icpc rows for the given match type (`duel` or `blitz`),
+        never both mixed together."""
         target = user or ctx.author
         pool = get_pool()
         async with pool.acquire() as conn:
             profile = await dq.get_profile(conn, str(target.id), str(ctx.guild.id))
+        profile = [row for row in profile if row["mode"].endswith(f"_{mtype}")]
         if not profile:
-            await ctx.send(f"{target.name} hasn't participated in any duels yet.")
+            label = "duels" if mtype == "duel" else "blitz matches"
+            await ctx.send(f"{target.name} hasn't participated in any {label} yet.")
             return
+        title = "Duel" if mtype == "duel" else "Blitz"
         em = _brand(f"__{target.name}__", color=CLR_MATCH, thumb=False)
-        em.description = "Ratings and records across all modes\n"
+        em.description = f"{title} ratings and records — CP / DSA / ICPC\n"
         em.timestamp = datetime.now(timezone.utc)
         for row in profile:
             rating = row["rating"]
@@ -653,57 +1064,13 @@ class Duels(commands.Cog):
         em.set_footer(text=BRAND, icon_url=BOT_LOGO)
         await ctx.send(embed=em)
 
-    @commands.command(name="duelrank", help="Check your rank/tier in a mode.")
-    async def duel_rank(self, ctx, mode: str = None):
-        if mode:
-            mode = mode.lower()
-            if mode not in MODES:
-                await ctx.send(f"Invalid mode: {mode}")
-                return
-            modes_to_check = [mode]
-        else:
-            modes_to_check = list(MODES.keys())
-        pool = get_pool()
-        async with pool.acquire() as conn:
-            profile = await dq.get_profile(conn, str(ctx.author.id), str(ctx.guild.id))
-        em = _brand(f"__{ctx.author.name}__", color=CLR_MATCH, thumb=False)
-        em.description = "Current ranks"
-        em.timestamp = datetime.now(timezone.utc)
-        for row in profile:
-            if row["mode"] not in modes_to_check:
-                continue
-            rank_info = duel_ranks.get_rank(row["rating"])
-            em.add_field(name=f"__{MODES[row['mode']]['label']}__",
-                         value=f"**{rank_info['name']}** · `{row['rating']}`", inline=True)
-        em.set_footer(text=BRAND, icon_url=BOT_LOGO)
-        await ctx.send(embed=em)
+    @commands.command(name="duelprofile", help="View your or someone's DUEL ratings (CP/DSA/ICPC).")
+    async def duel_profile(self, ctx, user: discord.User = None):
+        await self._profile_cmd(ctx, user, "duel")
 
-    @commands.command(name="duelleaderboard", help="Top duel players in a mode.")
-    async def duel_leaderboard(self, ctx, mode: str = "cp_duel"):
-        mode = mode.lower()
-        if mode not in MODES:
-            await ctx.send(f"Invalid mode: {mode}")
-            return
-        pool = get_pool()
-        async with pool.acquire() as conn:
-            rows = await dq.get_leaderboard(conn, str(ctx.guild.id), mode, limit=10)
-        em = _brand(f"__Leaderboard — {MODES[mode]['label']}__", color=CLR_MATCH, thumb=False)
-        em.timestamp = datetime.now(timezone.utc)
-        if not rows:
-            em.description = "No players yet."
-            await ctx.send(embed=em)
-            return
-        lines = []
-        for i, row in enumerate(rows, 1):
-            user = self.bot.get_user(int(row["discord_id"])) if row["discord_id"].isdigit() else None
-            name = user.display_name if user else f"User {row['discord_id']}"
-            rank_info = duel_ranks.get_rank(row["rating"])
-            record = f"`{row['wins']}W` `{row['losses']}L` `{row['draws']}D`"
-            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"`{i}.`")
-            lines.append(f"{medal} **{name}** — {rank_info['name']} · `{row['rating']}`\n  {record}")
-        em.description = "\n\n".join(lines)
-        em.set_footer(text=BRAND, icon_url=BOT_LOGO)
-        await ctx.send(embed=em)
+    @commands.command(name="blitzprofile", help="View your or someone's BLITZ ratings (CP/DSA/ICPC).")
+    async def blitz_profile(self, ctx, user: discord.User = None):
+        await self._profile_cmd(ctx, user, "blitz")
 
     # ── Bot fallback ─────────────────────────────────────────────────────
 
@@ -718,6 +1085,198 @@ class Duels(commands.Cog):
             await channel.send(embed=em, view=BotFallbackView(self, challenger, mode))
         except Exception:
             pass
+
+    # ── Auto-matchmaking-with-bot on no response ────────────────────────────
+
+    async def _send_self_destruct(self, channel, content: str, delay: float = 6):
+        """Send a message that deletes itself after `delay` seconds —
+        used for invalid-input errors so they don't clutter the channel."""
+        try:
+            msg = await channel.send(content)
+        except Exception:
+            return
+        await asyncio.sleep(delay)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+    def _wait_frame(self, remaining: int, opponent_name: str) -> str:
+        """Same plain ANSI style as STATUS_ROOM_CREATING — kept as a single
+        line that gets edited in place, one tick per second."""
+        text = f"»  Waiting for {opponent_name} to accept — {remaining}s"
+        return f"```ansi\n\u001b[0;37m{text}\u001b[0m\n```"
+
+    def _automatch_frame(self) -> str:
+        """First step of the no-response sequence — branded, no mention of
+        'bot' since the player never asked for one explicitly."""
+        return f"```ansi\n\u001b[0;37m»  Automatchmaking with the {WEBHOOK_NAME}!\u001b[0m\n```"
+
+    async def _run_automatch_sequence(self, channel, msg=None):
+        """Two-step status message shown right before an automatic bot
+        match: 'Automatchmaking with the Z4s!' for a beat, then the same
+        room-setup wait frame used everywhere else (STATUS_ROOM_CREATING).
+        Reuses an existing message (e.g. the challenge countdown ticker)
+        when given one, otherwise sends a fresh one. Returns the message
+        so the caller can hand it to begin_bot_match as status_msg — it
+        gets deleted there once the room is live."""
+        if msg is None:
+            try:
+                msg = await channel.send(self._automatch_frame())
+            except Exception:
+                return None
+        else:
+            try:
+                await msg.edit(content=self._automatch_frame())
+            except Exception:
+                pass
+        await asyncio.sleep(1.5)
+        try:
+            await msg.edit(content=STATUS_ROOM_CREATING)
+        except Exception:
+            pass
+        return msg
+
+    async def _run_challenge_countdown(self, view: "ChallengeView", seconds: int):
+        """
+        Live countdown next to the challenge card: ticks {seconds}→0, edited
+        in place every second (same edit-in-place pattern as the pre-match
+        countdown / room-creation status message). If Accept/Decline/Cancel
+        happens first, this just cleans up its own message and does nothing
+        else — those handlers already manage their own outcome. Only a
+        genuine full-window timeout (view.responded still False when the
+        clock hits 0) triggers the automatic bot match.
+
+        This is the ONLY path that's supposed to trigger the auto-bot-match
+        on timeout — ChallengeView's own built-in discord.py timeout is
+        strictly a safety net that just deletes the card (see its
+        docstring). So this task must not be able to die quietly: even if
+        the ticker message itself fails to send/edit, the countdown must
+        keep running and still reach the automatch trigger at the end.
+        An outer try/except is a second safety net in case something here
+        throws for a reason we didn't anticipate.
+        """
+        channel = view.message.channel if view.message else view.ctx.channel
+        try:
+            await self._run_challenge_countdown_inner(view, seconds, channel)
+        except Exception as e:
+            print(f"[DUEL_CMD] ❌ countdown task crashed unexpectedly: "
+                  f"{type(e).__name__}: {e}", flush=True)
+            import traceback; traceback.print_exc()
+            if view.responded:
+                return  # challenge was already handled some other way
+            view.responded = True
+            view.stop()
+            try:
+                if view.message:
+                    await view.message.delete()
+            except Exception:
+                pass
+            try:
+                status_msg = await self._run_automatch_sequence(channel)
+                await self._auto_bot_fallback(view.ctx, view.challenger, view.mode,
+                                              view.format_num, status_msg=status_msg)
+            except Exception as e2:
+                print(f"[DUEL_CMD] ❌ emergency auto-matchmaking also failed: "
+                      f"{type(e2).__name__}: {e2}", flush=True)
+                asyncio.create_task(self._send_self_destruct(
+                    channel,
+                    f"❌ Auto-matchmaking with {WEBHOOK_NAME} failed to start. "
+                    f"Try `!{'blitz' if view.mode.endswith('_blitz') else 'duel'} "
+                    f"@user {view.mode.split('_')[0]} {view.format_num}` again."))
+
+    async def _run_challenge_countdown_inner(self, view: "ChallengeView", seconds: int, channel):
+        opp_name = view.opponent.display_name
+
+        # Sending the visible ticker is best-effort only — its failure must
+        # NEVER stop the underlying countdown/automatch logic from running.
+        # (This used to `return` here on failure, which silently killed the
+        # whole timeout→automatch path — that was the actual bug.)
+        msg = None
+        try:
+            msg = await channel.send(self._wait_frame(seconds, opp_name))
+        except Exception as e:
+            print(f"[DUEL_CMD] ⚠️ countdown ticker send failed, continuing "
+                  f"without a visible ticker: {type(e).__name__}: {e}", flush=True)
+
+        remaining = seconds
+        while remaining > 0 and not view.responded:
+            await asyncio.sleep(1)
+            remaining -= 1
+            if view.responded:
+                break
+            if msg:
+                try:
+                    await msg.edit(content=self._wait_frame(remaining, opp_name))
+                except Exception:
+                    # Stop trying to render it, but keep counting down —
+                    # the countdown itself must survive a display failure.
+                    msg = None
+
+        if view.responded:
+            # Accept/Decline/Cancel already handled the challenge card and
+            # its own status message — just clean up our ticking message.
+            try:
+                if msg:
+                    await msg.delete()
+            except Exception:
+                pass
+            return
+
+        # Genuine timeout — nobody responded in time.
+        view.responded = True
+        view.stop()
+        try:
+            if view.message:
+                await view.message.delete()
+        except Exception:
+            pass
+
+        print(f"[DUEL_CMD] timeout, no response — auto-matching {view.challenger.name} vs bot "
+              f"mode={view.mode}", flush=True)
+        try:
+            status_msg = await self._run_automatch_sequence(channel, msg)
+            await self._auto_bot_fallback(view.ctx, view.challenger, view.mode, view.format_num,
+                                          status_msg=status_msg)
+        except Exception as e:
+            # Never let this fail silently — the previous behaviour on an
+            # unexpected error here was: challenge card gone, nothing else
+            # ever shown. Log it AND tell the channel so it's obvious the
+            # bot match didn't start, instead of the room just going quiet.
+            print(f"[DUEL_CMD] ❌ auto-matchmaking failed: {type(e).__name__}: {e}", flush=True)
+            import traceback; traceback.print_exc()
+            asyncio.create_task(self._send_self_destruct(
+                channel,
+                f"❌ Auto-matchmaking with {WEBHOOK_NAME} failed to start. "
+                f"Try `!{'blitz' if view.mode.endswith('_blitz') else 'duel'} "
+                f"@user {view.mode.split('_')[0]} {view.format_num}` again."))
+
+    async def _auto_bot_fallback(self, ctx, challenger, mode: str, format_num: int, status_msg=None):
+        """Automatically start a bot match — no button, no extra step —
+        the instant a human challenge goes unanswered or gets declined.
+        Reuses the exact same '~5s room setup' status message + cleanup
+        flow as the direct-match path. If the caller already ran the
+        Automatchmaking→Setting-up-room sequence (timeout/decline), pass
+        that message in as status_msg; otherwise one is created here."""
+        if status_msg is None:
+            try:
+                status_msg = await ctx.channel.send(STATUS_ROOM_CREATING)
+            except Exception:
+                status_msg = None
+        try:
+            fallback_rating = await self._get_or_create_duel_rating(challenger, ctx.guild, mode)
+        except Exception as e:
+            print(f"[DUEL_CMD] ❌ rating fetch failed before bot match: {type(e).__name__}: {e}", flush=True)
+            if status_msg:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+            raise
+        bot_rating = botengine.resolve_bot_rating(None, fallback_rating["rating"])
+        await self.begin_bot_match(ctx, challenger, None, mode, bot_rating, format_num,
+                                   status_msg=status_msg)
+
 
     # ── Match setup ────────────────────────────────────────────────────────
 
@@ -770,7 +1329,14 @@ class Duels(commands.Cog):
             except Exception as e:
                 print(f"[MATCH] ⚠️ could not delete orphan channel: {e}", flush=True)
 
-    async def begin_human_match(self, ctx, challenger, opponent, mode: str, format_num: int = 3):
+    async def begin_human_match(self, ctx, challenger, opponent, mode: str, format_num: int = 3,
+                                status_msg=None):
+        async def _clear_status():
+            if status_msg:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
         try:
             print(f"[MATCH] human: {challenger.name} vs {opponent.name} mode={mode} n={format_num}", flush=True)
             pool = get_pool()
@@ -794,7 +1360,9 @@ class Duels(commands.Cog):
                     else:
                         busy_who = "You"
                     if busy:
-                        await ctx.channel.send(await self._busy_message(busy, busy_who))
+                        await _clear_status()
+                        asyncio.create_task(self._send_self_destruct(
+                            ctx.channel, await self._busy_message(busy, busy_who)))
                         return
 
                     used = await dq.get_active_duel_numbers(conn, guild_id)
@@ -818,8 +1386,12 @@ class Duels(commands.Cog):
                 # duel row must NOT stay 'pending'/'active' — that would
                 # permanently block both players (one-match-at-a-time check)
                 # and leave an orphan room where no match ever started.
+                await _clear_status()
                 await self._void_failed_setup(duel_id, channel)
                 raise
+            # Room is confirmed live at this point — clear the "setting up"
+            # status message right before posting the real jump card.
+            await _clear_status()
             # ── Jump-link back to the original channel ──
             try:
                 jump = _brand("__Match room is live.__", color=CLR_WIN, thumb=False)
@@ -836,15 +1408,21 @@ class Duels(commands.Cog):
             else:
                 await self._start_blitz_problem(channel, duel_id, mode, cfg)
         except Exception as e:
+            await _clear_status()
             print(f"[MATCH] ❌ human setup failed: {type(e).__name__}: {e}", flush=True)
             import traceback; traceback.print_exc()
-            try:
-                await ctx.channel.send(f"❌ Match setup failed: {e}")
-            except Exception:
-                pass
+            asyncio.create_task(self._send_self_destruct(
+                ctx.channel, f"❌ Match setup failed: {e}"))
 
     async def begin_bot_match(self, ctx, challenger, opponent, mode: str,
-                              bot_rating: int = None, format_num: int = 3):
+                              bot_rating: int = None, format_num: int = 3,
+                              status_msg=None):
+        async def _clear_status():
+            if status_msg:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
         try:
             print(f"[MATCH] bot: {challenger.name} mode={mode} bot={bot_rating} n={format_num}", flush=True)
             pool = get_pool()
@@ -863,7 +1441,9 @@ class Duels(commands.Cog):
                 async with pool.acquire() as conn:
                     busy = await self._active_duel_for_user(conn, guild_id, str(challenger.id))
                     if busy:
-                        await ctx.channel.send(await self._busy_message(busy, "You"))
+                        await _clear_status()
+                        asyncio.create_task(self._send_self_destruct(
+                            ctx.channel, await self._busy_message(busy, "You")))
                         return
 
                     used = await dq.get_active_duel_numbers(conn, guild_id)
@@ -885,9 +1465,13 @@ class Duels(commands.Cog):
             except Exception:
                 # Same cleanup as human matches: never leave a stale
                 # 'pending'/'active' duel row + orphan room behind.
+                await _clear_status()
                 await self._void_failed_setup(duel_id, channel)
                 raise
             # ── Jump-link back to the original channel ──
+            # Room is confirmed live at this point — clear the "setting up"
+            # status message right before posting the real jump card.
+            await _clear_status()
             try:
                 jump = _brand("__Match room is live.__", color=CLR_WIN, thumb=False)
                 jump.description = f"→ {channel.mention}"
@@ -904,19 +1488,19 @@ class Duels(commands.Cog):
                 await self._start_blitz_problem(channel, duel_id, mode, cfg, is_bot=True)
             print(f"[MATCH] ✅ started duel_id={duel_id} #{duel_num}", flush=True)
         except Exception as e:
+            await _clear_status()
             print(f"[MATCH] ❌ bot setup failed: {type(e).__name__}: {e}", flush=True)
             import traceback; traceback.print_exc()
-            try:
-                await ctx.channel.send(f"❌ Bot match setup failed: {e}")
-            except Exception:
-                pass
+            asyncio.create_task(self._send_self_destruct(
+                ctx.channel, f"❌ Bot match setup failed: {e}"))
+
 
     async def _create_duel_channel(self, ctx, player1, player2, mode: str,
                                    duel_number: int, is_bot: bool = False) -> discord.TextChannel:
         family = MODES[mode]["family"]
         kind = "duel" if _is_duel_mode(mode) else "blitz"   # room name matches the actual format
         if is_bot:
-            channel_name = f"{family}-{kind}-{duel_number}-{player1.name}-vs-bot"
+            channel_name = f"{family}-{kind}-{duel_number}-{player1.name}-vs-{WEBHOOK_NAME}"
         else:
             channel_name = f"{family}-{kind}-{duel_number}-{player1.name}-vs-{player2.name}"
         channel_name = channel_name.lower().replace(" ", "-")[:100]
@@ -965,10 +1549,10 @@ class Duels(commands.Cog):
 
         channel = await guild.create_text_channel(
             channel_name, category=category, overwrites=overwrites,
-            reason=f"Duel: {p1.name} vs {p2.name if p2 else 'Bot'}")
+            reason=f"Duel: {p1.name} vs {p2.name if p2 else WEBHOOK_NAME}")
 
         mode_label = MODES[mode]["label"]
-        topic = (f"🤖 {mode_label} · {p1.name} vs Bot" if is_bot
+        topic = (f"🤖 {mode_label} · {p1.name} vs {WEBHOOK_NAME}" if is_bot
                  else f"{mode_label} · {p1.name} vs {p2.name}")
         try:
             await channel.edit(topic=topic)
@@ -1085,16 +1669,11 @@ class Duels(commands.Cog):
             color=CLR_MATCH, banner=is_first)
 
         if is_first:
-            # VS card with centered alignment
-            vs_line = f"{p1_name}  vs  {p2_name}"
-            rat_line = f"{p1_rank['name']} ({p1_rating['rating']})  ·  ({p2_rating['rating']}) {p2_rank['name']}"
-            w = max(len(vs_line), len(rat_line)) + 4
+            # VS card with centered alignment (mobile-safe width)
+            vs_block = self._vs_card(p1_name, p2_name, p1_rank, p1_rating, p2_rank, p2_rating)
             em.description = (
                 f"**{MODE_BLURB[mode]}** · **{total}** problems, one at a time\n\n"
-                f"```\n"
-                f"{vs_line:^{w}}\n"
-                f"{rat_line:^{w}}\n"
-                f"```\n"
+                f"{vs_block}\n"
                 f"First verified solve takes each problem.\n"
                 f"Timer expires → draw → next problem.")
         else:
@@ -1329,16 +1908,11 @@ class Duels(commands.Cog):
             f"__{MODES[mode]['label']} — Match #{match_num}__",
             color=CLR_MATCH, banner=True)
 
-        # VS card with centered alignment
-        vs_line = f"{p1_name}  vs  {p2_name}"
-        rat_line = f"{p1_rank['name']} ({p1_rating['rating']})  ·  ({p2_rating['rating']}) {p2_rank['name']}"
-        w = max(len(vs_line), len(rat_line)) + 4
+        # VS card with centered alignment (mobile-safe width)
+        vs_block = self._vs_card(p1_name, p2_name, p1_rank, p1_rating, p2_rank, p2_rating)
         em.description = (
             f"**{MODE_BLURB[mode]}** · **{n}** problems · **{total_secs // 60} min** total\n\n"
-            f"```\n"
-            f"{vs_line:^{w}}\n"
-            f"{rat_line:^{w}}\n"
-            f"```\n"
+            f"{vs_block}\n"
             f"Solve in order. Next problem unlocks (privately)\n"
             f"when you finish the current one.")
 

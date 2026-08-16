@@ -12,12 +12,35 @@ from config import COLOR_SUCCESS, COLOR_ERROR, COLOR_INFO, ADMIN_ROLE
 
 PLATFORM_ICONS = {"cf": "🔵", "lc": "🟡", "cc": "🟤", "atcoder": "🔴"}
 
+# ── Branding (matches duels.py / problems.py look) ───────────────────────
+BOT_LOGO   = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats.webp"
+BOT_BANNER = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats%20Banner.jpeg"
+BRAND      = "Handle Registry"
+
+CLR_MATCH   = 0x00D9FF   # cyan — info / listings
+CLR_WIN     = 0x57F287   # green — success
+CLR_LOSS    = 0xED4245   # red — errors
+CLR_NEUTRAL = 0x2F3136   # dark — neutral confirmations
+
+
+def _brand(title: str, desc: str = None, color: int = CLR_MATCH,
+           *, thumb: bool = True, banner: bool = False) -> discord.Embed:
+    em = discord.Embed(title=title, description=desc, color=color)
+    em.set_author(name=BRAND, icon_url=BOT_LOGO)
+    if thumb:
+        em.set_thumbnail(url=BOT_LOGO)
+    if banner:
+        em.set_image(url=BOT_BANNER)
+    return em
+
 
 class Registry(commands.Cog):
     """Handle registration of CP platform accounts."""
 
     def __init__(self, bot):
         self.bot = bot
+
+    # ── !register ────────────────────────────────────────────────────────
 
     @commands.command(name="register")
     async def register(self, ctx, platform: str = None, handle: str = None):
@@ -26,10 +49,11 @@ class Registry(commands.Cog):
         !register cf tourist
         """
         if not platform or not handle:
-            embed = discord.Embed(title="📝  Register Handle  —  Usage", color=COLOR_INFO)
-            embed.add_field(name="Command",   value="`!register <platform> <handle>`", inline=False)
-            embed.add_field(name="Example",   value="`!register cf tourist`",          inline=False)
-            embed.add_field(name="Platforms", value=P.choices_str(),                   inline=False)
+            embed = _brand(title="__Register Handle__  ·  Usage", color=CLR_MATCH)
+            embed.add_field(name="__Command__",   value="`!register <platform> <handle>`", inline=False)
+            embed.add_field(name="__Example__",   value="`!register cf tourist`",          inline=False)
+            embed.add_field(name="__Platforms__", value=P.choices_str(),                   inline=False)
+            embed.set_footer(text=BRAND, icon_url=BOT_LOGO)
             await ctx.send(embed=embed)
             return
 
@@ -51,13 +75,15 @@ class Registry(commands.Cog):
             await q.set_handle(conn, str(ctx.author.id), adapter.KEY, handle)
 
         pemoji = PLATFORM_ICONS.get(adapter.KEY, "⚪")
-        embed = discord.Embed(title="✅  Handle Registered", color=COLOR_SUCCESS)
-        embed.set_thumbnail(url=ctx.author.display_avatar.url)
-        embed.add_field(name="Member",   value=ctx.author.mention, inline=True)
-        embed.add_field(name="Platform", value=f"{pemoji}  {adapter.NAME}", inline=True)
-        embed.add_field(name="Handle",   value=f"`{handle}`",        inline=True)
-        embed.set_footer(text=status.replace("✅ ", ""))
+        embed  = _brand(title="__Handle Registered__", color=CLR_WIN, thumb=False)
+        embed.set_thumbnail(url=ctx.author.display_avatar.url)   # personal — user's avatar
+        embed.add_field(name="__Member__",   value=ctx.author.mention,          inline=True)
+        embed.add_field(name="__Platform__", value=f"{pemoji}  {adapter.NAME}", inline=True)
+        embed.add_field(name="__Handle__",   value=f"`{handle}`",               inline=True)
+        embed.set_footer(text=status.replace("✅ ", ""), icon_url=BOT_LOGO)
         await msg.edit(content=None, embed=embed)
+
+    # ── !unregister ──────────────────────────────────────────────────────
 
     @commands.command(name="unregister")
     async def unregister(self, ctx, platform: str = None):
@@ -76,7 +102,15 @@ class Registry(commands.Cog):
             await q.delete_handle(conn, str(ctx.author.id), adapter.KEY)
 
         pemoji = PLATFORM_ICONS.get(adapter.KEY, "⚪")
-        await ctx.send(f"✅  Unlinked {pemoji} **{adapter.NAME}** handle `{handle}`.")
+        embed  = _brand(
+            title="__Handle Unlinked__",
+            desc=f"{pemoji}  **{adapter.NAME}**  ·  `{handle}`",
+            color=CLR_NEUTRAL,
+        )
+        embed.set_footer(text=f"By {ctx.author.display_name}", icon_url=BOT_LOGO)
+        await ctx.send(embed=embed)
+
+    # ── !profile ─────────────────────────────────────────────────────────
 
     @commands.command(name="profile")
     async def profile(self, ctx, member: discord.Member = None):
@@ -97,36 +131,42 @@ class Registry(commands.Cog):
             if hasattr(s["assigned_date"], "year") and s["assigned_date"] == today
         )
 
-        embed = discord.Embed(
-            title=f"👤  {target.display_name}",
-            color=COLOR_INFO,
+        embed = _brand(
+            title=f"__{target.display_name}__",
+            color=CLR_MATCH,
+            thumb=False,
         )
-        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.set_thumbnail(url=target.display_avatar.url)   # user avatar as thumbnail
 
         # Linked handles
         if handles:
             handle_lines = "\n".join(
-                f"{PLATFORM_ICONS.get(h['platform'], '⚪')}  **{P.names().get(h['platform'], h['platform'])}:** `{h['handle']}`"
+                f"{PLATFORM_ICONS.get(h['platform'], '⚪')}  **{P.names().get(h['platform'], h['platform'])}**  ·  `{h['handle']}`"
                 for h in handles
             )
         else:
             handle_lines = "*None — use `!register`*"
-        embed.add_field(name="🔗  Linked Accounts", value=handle_lines, inline=False)
+        embed.add_field(name="__Linked Accounts__", value=handle_lines, inline=False)
 
         # Stats
-        embed.add_field(name="🏅  Total Points",  value=f"**{total_pts}**",       inline=True)
-        embed.add_field(name="✅  Solved",         value=f"**{len(solves)}**",     inline=True)
-        embed.add_field(name="☀️  Today",          value=f"**{today_pts} pts**",   inline=True)
+        embed.add_field(name="__Total Points__", value=f"**{total_pts}**",     inline=True)
+        embed.add_field(name="__Solved__",       value=f"**{len(solves)}**",   inline=True)
+        embed.add_field(name="__Today__",        value=f"**{today_pts} pts**", inline=True)
 
         if adj_total != 0:
             embed.add_field(
-                name="🎛️  Manual Adjustments",
+                name="__Manual Adjustments__",
                 value=f"`{adj_total:+d} pts`",
                 inline=False,
             )
 
-        embed.set_footer(text=f"Solve pts: {solve_pts}  ·  Adjustments: {adj_total:+d}")
+        embed.set_footer(
+            text=f"Solve pts: {solve_pts}  ·  Adjustments: {adj_total:+d}",
+            icon_url=BOT_LOGO,
+        )
         await ctx.send(embed=embed)
+
+    # ── !handles ─────────────────────────────────────────────────────────
 
     @commands.command(name="handles")
     async def handles(self, ctx, platform: str = None):
@@ -139,9 +179,9 @@ class Registry(commands.Cog):
                     await ctx.send(f"Unknown platform `{platform}`.")
                     return
                 rows  = await q.get_all_handles_for_platform(conn, adapter.KEY)
-                title = f"{PLATFORM_ICONS.get(adapter.KEY, '⚪')}  {adapter.NAME} Handles"
+                title = f"__{adapter.NAME} Handles__"
             else:
-                rows, title = [], "📋  All Registered Handles"
+                rows, title = [], "__All Registered Handles__"
                 for key in P.keys():
                     for r in await q.get_all_handles_for_platform(conn, key):
                         rows.append({**dict(r), "platform": key})
@@ -156,11 +196,16 @@ class Registry(commands.Cog):
             name   = f"**{member.display_name}**" if member else "*Left server*"
             pemoji = PLATFORM_ICONS.get(row.get("platform", ""), "⚪")
             pname  = P.names().get(row.get("platform", ""), "")
-            lines.append(f"{pemoji}  {name} — `{row['handle']}`  *({pname})*")
+            lines.append(f"{pemoji}  {name}  ·  `{row['handle']}`  *({pname})*")
 
-        embed = discord.Embed(title=title, description="\n".join(lines[:25]), color=COLOR_INFO)
+        embed = _brand(title=title, desc="\n".join(lines[:25]), color=CLR_MATCH)
         if len(lines) > 25:
-            embed.set_footer(text=f"+{len(lines)-25} more  ·  {len(lines)} total")
+            embed.set_footer(
+                text=f"+{len(lines)-25} more  ·  {len(lines)} total",
+                icon_url=BOT_LOGO,
+            )
+        else:
+            embed.set_footer(text=f"{len(lines)} total", icon_url=BOT_LOGO)
         await ctx.send(embed=embed)
 
 

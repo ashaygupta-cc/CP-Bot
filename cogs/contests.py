@@ -69,6 +69,49 @@ POLL_MINUTES   = 30
 FETCH_DAYS     = 7     # fetch contests starting within next 7 days
 
 
+# ── Branding + webhook identity ────────────────────────────────────────────────
+BOT_LOGO     = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats.webp"
+BOT_BANNER   = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats%20Banner.jpeg"
+BRAND        = "Contest Reminder"
+WEBHOOK_NAME = "Contest Reminder"   # what appears as the sender in the channel
+
+CLR_MATCH   = 0x00D9FF   # cyan — info / listings
+CLR_WIN     = 0x57F287   # green — success
+CLR_LOSS    = 0xED4245   # red — 1-hour warning / errors
+CLR_RESULT  = 0xFEE75C   # gold — warnings
+
+
+def _brand(title: str, desc: str = None, color: int = CLR_MATCH,
+           *, thumb: bool = True, banner: bool = False) -> discord.Embed:
+    em = discord.Embed(title=title, description=desc, color=color)
+    em.set_author(name=BRAND, icon_url=BOT_LOGO)
+    if thumb:
+        em.set_thumbnail(url=BOT_LOGO)
+    if banner:
+        em.set_image(url=BOT_BANNER)
+    return em
+
+
+async def _reminder_webhook(channel: discord.TextChannel) -> discord.Webhook | None:
+    """Get-or-create a webhook that lets us post reminders as
+    'Contest Reminder' with the bot logo, instead of as the bot's own name.
+    Returns None if we lack Manage Webhooks — caller then uses plain send."""
+    try:
+        me = channel.guild.me
+        if me is None or not channel.permissions_for(me).manage_webhooks:
+            return None
+        for h in await channel.webhooks():
+            if h.name == WEBHOOK_NAME and h.user and h.user.id == me.id:
+                return h
+        return await channel.create_webhook(
+            name=WEBHOOK_NAME,
+            reason="Contest Reminder identity",
+        )
+    except Exception as e:
+        print(f"[contests] webhook setup failed in #{channel.name}: {e}", flush=True)
+        return None
+
+
 # ── Duration formatter ─────────────────────────────────────────────────────────
 def _fmt_dur(seconds: int) -> str:
     h, rem = divmod(seconds, 3600)
@@ -584,47 +627,34 @@ async def fetch_all_contests() -> list[dict]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _build_embed(contest: dict, label: str, guild: discord.Guild) -> discord.Embed:
-    plat   = PLATFORMS[contest["key"]]
-    name   = contest["name"]
-    url    = contest["url"]
-    ts     = int(contest["start_ts"])
-    dur    = contest["duration"]
+    plat = PLATFORMS[contest["key"]]
+    name = contest["name"]
+    url  = contest["url"]
+    ts   = int(contest["start_ts"])
+    dur  = contest["duration"]
 
     label_info = {
-        "12h": ("🕛", "Starting in **12 hours**",  plat["color"]),
-        "6h":  ("🕕", "Starting in **6 hours**",   plat["color"]),
-        "1h":  ("⏰", "Starting in **1 hour** — Get ready!", 0xED4245),
+        "12h": ("Starts in 12 hours",             plat["color"]),
+        "6h":  ("Starts in 6 hours",              plat["color"]),
+        "1h":  ("Starts in 1 hour — get ready",   CLR_LOSS),
     }
-    l_emoji, l_text, color = label_info.get(label, ("🔔", "Starting soon", plat["color"]))
+    l_text, color = label_info.get(label, ("Starting soon", plat["color"]))
 
+    # Webhook posts this with WEBHOOK_NAME already as the outer sender, so no
+    # need to set_author here — that'd just duplicate. Keep the embed clean.
     embed = discord.Embed(
-        title=f"{l_emoji}  {plat['emoji']}  {name}",
+        title=f"{plat['emoji']}  {name}",
         url=url,
         color=color,
-        description=l_text,
+        description=f"__{l_text}__",
     )
-    embed.add_field(
-        name="🕐  Starts",
-        value=f"<t:{ts}:F>\n<t:{ts}:R>",
-        inline=True,
-    )
+    embed.set_thumbnail(url=BOT_LOGO)
+    embed.add_field(name="__Starts__",   value=f"<t:{ts}:F>\n<t:{ts}:R>",         inline=True)
     if dur:
-        embed.add_field(
-            name="⏱️  Duration",
-            value=_fmt_dur(dur),
-            inline=True,
-        )
-    embed.add_field(
-        name="🌐  Platform",
-        value=f"{plat['emoji']}  **{plat['name']}**",
-        inline=True,
-    )
-    embed.add_field(
-        name="🔗  Link",
-        value=f"[Open Contest]({url})",
-        inline=False,
-    )
-    embed.set_footer(text=f"CP Bot  ·  Contest Reminder  ·  {plat['name']}")
+        embed.add_field(name="__Duration__", value=_fmt_dur(dur),                 inline=True)
+    embed.add_field(name="__Platform__", value=f"{plat['emoji']}  **{plat['name']}**", inline=True)
+    embed.add_field(name="__Link__",     value=f"[Open contest]({url})",           inline=False)
+    embed.set_footer(text=f"Contest Reminder  ·  {plat['name']}", icon_url=BOT_LOGO)
     return embed
 
 
@@ -686,8 +716,19 @@ class Contests(commands.Cog):
 
                     embed   = _build_embed(c, label, guild)
                     ping    = _ping(guild)
+                    webhook = await _reminder_webhook(ch)
                     try:
-                        if ping:
+                        if webhook:
+                            await webhook.send(
+                                content=ping or None,
+                                embed=embed,
+                                username=WEBHOOK_NAME,
+                                avatar_url=BOT_LOGO,
+                                allowed_mentions=discord.AllowedMentions(
+                                    everyone=True, roles=True, users=False,
+                                ),
+                            )
+                        elif ping:
                             await ch.send(content=ping, embed=embed)
                         else:
                             await ch.send(embed=embed)
@@ -720,9 +761,9 @@ class Contests(commands.Cog):
             await msg.edit(content="📭  No upcoming contests found in the next 7 days.")
             return
 
-        embed = discord.Embed(
-            title="📅  Upcoming Contests  —  Next 7 Days",
-            color=0x5865F2,
+        embed = _brand(
+            title="__Upcoming Contests__  ·  Next 7 days",
+            color=CLR_MATCH,
         )
 
         # Single chronological list (contests already sorted by start_ts)
@@ -737,7 +778,10 @@ class Contests(commands.Cog):
             )
 
         embed.description = "\n\n".join(lines)
-        embed.set_footer(text="Reminders auto-posted at 12h · 6h · 1h before each contest.")
+        embed.set_footer(
+            text="Reminders auto-posted at 12h · 6h · 1h before each contest.",
+            icon_url=BOT_LOGO,
+        )
         await msg.edit(content=None, embed=embed)
 
     # ── !contestcheck ─────────────────────────────────────────────────────────

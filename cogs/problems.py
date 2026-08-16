@@ -1,9 +1,11 @@
 """
-cogs/problems.py  — v3
-!problems  → shows TODAY's problems only, with week label + today's date.
-             Once the day ends (midnight IST) those problems are gone from the view
-             and the next day's problems appear automatically.
-!addproblem / !removeproblem / !setdifficulty unchanged.
+cogs/problems.py  — v4
+!problems  → shows TODAY's problems only, split into DSA + CP sections
+             (each sorted easy → medium → hard). Once the day ends
+             (midnight IST) today's problems disappear from view and
+             the next day's appear automatically.
+!addproblem / !removeproblem / !setdifficulty / !removeifunsolved — admin-only,
+             now share the branded embed look.
 """
 
 import asyncio
@@ -24,6 +26,31 @@ DIFF_ORDER = {"easy": 0, "medium": 1, "hard": 2, "expert": 3, "master": 4}
 
 def _difficulty_sort_key(prob):
     return (DIFF_ORDER.get(prob["difficulty"], 99), prob["id"])
+
+
+# ── Branding (matches duels.py look) ─────────────────────────────────────
+BOT_LOGO   = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats.webp"
+BOT_BANNER = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats%20Banner.jpeg"
+BRAND      = "Problem Picker"
+
+CLR_MATCH   = 0x00D9FF   # cyan — info / listings
+CLR_WIN     = 0x57F287   # green — success
+CLR_LOSS    = 0xED4245   # red — errors, force-remove
+CLR_RESULT  = 0xFEE75C   # gold — warnings
+CLR_NEUTRAL = 0x2F3136   # dark — neutral
+
+PLATFORM_FAMILY = {"cf": "cp", "cc": "cp", "atcoder": "cp", "lc": "dsa"}
+
+
+def _brand(title: str, desc: str = None, color: int = CLR_MATCH,
+           *, thumb: bool = True, banner: bool = False) -> discord.Embed:
+    em = discord.Embed(title=title, description=desc, color=color)
+    em.set_author(name=BRAND, icon_url=BOT_LOGO)
+    if thumb:
+        em.set_thumbnail(url=BOT_LOGO)
+    if banner:
+        em.set_image(url=BOT_BANNER)
+    return em
 
 
 def is_admin():
@@ -54,14 +81,17 @@ class Problems(commands.Cog):
         !addproblem lc two-sum easy 2026-06-27 7
         """
         if not platform or not problem_id or not difficulty or not assigned_date:
-            embed = discord.Embed(title="📌  Add Problem  —  Usage", color=COLOR_INFO)
+            embed = _brand(
+                title="__Add Problem__  ·  Usage",
+                color=CLR_MATCH,
+            )
             embed.add_field(
-                name="Command",
+                name="__Command__",
                 value="`!addproblem <platform> <problem_id> <difficulty> <YYYY-MM-DD> [points]`",
                 inline=False,
             )
             embed.add_field(
-                name="Examples",
+                name="__Examples__",
                 value=(
                     "`!addproblem cf 1234A hard 2026-06-26`\n"
                     "`!addproblem lc two-sum easy 2026-06-27 7`\n"
@@ -69,7 +99,8 @@ class Problems(commands.Cog):
                 ),
                 inline=False,
             )
-            embed.add_field(name="Platforms", value=P.choices_str(), inline=False)
+            embed.add_field(name="__Platforms__", value=P.choices_str(), inline=False)
+            embed.set_footer(text=BRAND, icon_url=BOT_LOGO)
             await ctx.send(embed=embed)
             return
 
@@ -130,19 +161,27 @@ class Problems(commands.Cog):
         demoji = DIFF_EMOJIS.get(difficulty.lower(), "⚪")
         pemoji = PLATFORM_EMOJIS.get(adapter.KEY, "⚪")
 
-        embed = discord.Embed(
-            title=f"{pemoji}  Problem Added  —  {week['label']}",
-            color=COLOR_SUCCESS,
+        embed = _brand(
+            title=f"__Problem Added__  ·  DB `#{prob_db_id}`",
+            desc=f"**{week['label']}**  ·  Assigned for `{a_date}`  ·  {a_date.strftime('%A')}",
+            color=CLR_WIN,
         )
-        embed.add_field(name="Platform",   value=f"{pemoji}  {adapter.NAME}",              inline=True)
-        embed.add_field(name="Problem ID", value=f"`{pid}`",                                inline=True)
-        embed.add_field(name="Difficulty", value=f"{demoji}  {difficulty.capitalize()}",    inline=True)
-        embed.add_field(name="Points",     value=f"**{points} pts**",                       inline=True)
-        embed.add_field(name="Assigned",   value=f"`{a_date}` ({a_date.strftime('%A')})",   inline=True)
-        embed.add_field(name="DB ID",      value=f"`#{prob_db_id}`",                        inline=True)
+        embed.add_field(name="__Platform__",   value=f"{pemoji}  {adapter.NAME}",                inline=True)
+        embed.add_field(name="__Problem ID__", value=f"`{pid}`",                                  inline=True)
+        embed.add_field(name="__Difficulty__", value=f"{demoji}  {difficulty.capitalize()}",      inline=True)
+        embed.add_field(name="__Points__",     value=f"**{points} pts**",                         inline=True)
+        embed.add_field(name="__Assigned__",   value=f"`{a_date}`  ·  {a_date.strftime('%A')}",   inline=True)
+        embed.add_field(
+            name="__DB ID__",
+            value=f"`#{prob_db_id}`\nUse with `!removeproblem` or `!rius`",
+            inline=True,
+        )
         if url:
-            embed.add_field(name="🔗  Link", value=f"[Open Problem]({url})", inline=False)
-        embed.set_footer(text=f"Added by {ctx.author.display_name}  ·  Points awarded only on {a_date}")
+            embed.add_field(name="__Link__", value=f"[Open problem]({url})", inline=False)
+        embed.set_footer(
+            text=f"Added by {ctx.author.display_name}  ·  Points awarded only on {a_date}",
+            icon_url=BOT_LOGO,
+        )
         await ctx.send(embed=embed)
 
     # ── !removeproblem ───────────────────────────────────────────────────────
@@ -156,16 +195,17 @@ class Problems(commands.Cog):
         !removeproblem 42 no       — removes problem AND deletes solve records
         """
         if problem_db_id is None:
-            embed = discord.Embed(title="🗑️  Remove Problem  —  Usage", color=COLOR_INFO)
+            embed = _brand(title="__Remove Problem__  ·  Usage", color=CLR_MATCH)
             embed.add_field(
-                name="Commands",
+                name="__Commands__",
                 value=(
                     "`!removeproblem <db_id>`        — remove, keep solve history\n"
                     "`!removeproblem <db_id> no`     — remove AND delete solve records\n\n"
-                    "Find `db_id` with `!problems`"
+                    "Find `db_id` from the `!addproblem` confirmation embed."
                 ),
                 inline=False,
             )
+            embed.set_footer(text=BRAND, icon_url=BOT_LOGO)
             await ctx.send(embed=embed)
             return
 
@@ -178,23 +218,23 @@ class Problems(commands.Cog):
 
             if keep_history.lower() in ("no", "false", "0"):
                 await q.hard_remove_problem(conn, problem_db_id, str(ctx.guild.id))
-                note  = "❗ Solve records also deleted — points removed from leaderboards."
-                color = COLOR_ERROR
+                note  = "Solve records also deleted — points removed from leaderboards."
+                color = CLR_LOSS
             else:
                 await q.remove_problem_keep_solves(conn, problem_db_id, str(ctx.guild.id))
-                note  = "✅ Past solve records kept — points preserved in leaderboards."
-                color = COLOR_WARN
+                note  = "Past solve records kept — points preserved in leaderboards."
+                color = CLR_RESULT
 
         pemoji = PLATFORM_EMOJIS.get(prob["platform"], "⚪")
-        embed  = discord.Embed(
-            title=f"{pemoji}  Problem Removed",
-            description=(
-                f"**{prob['platform'].upper()}  `{prob['problem_id']}`**  (DB `#{problem_db_id}`)\n\n"
+        embed  = _brand(
+            title="__Problem Removed__",
+            desc=(
+                f"{pemoji}  **{prob['platform'].upper()}  `{prob['problem_id']}`**  ·  DB `#{problem_db_id}`\n\n"
                 f"{note}"
             ),
             color=color,
         )
-        embed.set_footer(text=f"By {ctx.author.display_name}")
+        embed.set_footer(text=f"By {ctx.author.display_name}", icon_url=BOT_LOGO)
         await ctx.send(embed=embed)
 
     # ── !problems ────────────────────────────────────────────────────────────
@@ -202,8 +242,8 @@ class Problems(commands.Cog):
     @commands.command(name="problems")
     async def list_problems(self, ctx):
         """
-        Shows ONLY today's problems — nothing else from the week.
-        - Title: "Week1  —  Day 6 of 7  —  YYYY-MM-DD"
+        Shows ONLY today's problems — split into DSA and CP sections.
+        - Title: "Week1  ·  Day 6 of 7  ·  YYYY-MM-DD"
         - Once midnight IST hits, today's problems disappear from the view
           and tomorrow's appear automatically (handled by get_problems_for_day).
         - No full-week list, no past/future problems shown — just today.
@@ -222,17 +262,23 @@ class Problems(commands.Cog):
             # Also get total week problems for context
             all_probs    = await q.get_problems_for_week(conn, str(ctx.guild.id), week["id"])
 
-        # Always display in fixed order: easy → medium → hard → expert (→ master/other)
-        todays_probs = sorted(todays_probs, key=_difficulty_sort_key)
+        # Split into DSA + CP families, each sorted easy → medium → hard
+        dsa_probs = sorted(
+            [p for p in todays_probs if PLATFORM_FAMILY.get(p["platform"]) == "dsa"],
+            key=_difficulty_sort_key,
+        )
+        cp_probs = sorted(
+            [p for p in todays_probs if PLATFORM_FAMILY.get(p["platform"]) == "cp"],
+            key=_difficulty_sort_key,
+        )
 
         # Work out where today sits in the week
-        # Use day_number_display() to clamp so we never show "Day 8 of 7"
         days_into_week, days_in_week = q.day_number_display(
             week["start_date"], week["end_date"], today
         )
         week_done     = today > week["end_date"]
         day_label     = f"Day {days_into_week} of {days_in_week}"
-        week_progress = day_label + (" — ✅ Week complete" if week_done else "")
+        week_progress = day_label + ("  ·  Week complete" if week_done else "")
 
         # Day window times for display (IST)
         # If week is already over, show the last valid day's window, not today's
@@ -240,21 +286,36 @@ class Problems(commands.Cog):
         day_start_ist = f"{display_date.strftime('%d %b %Y')}  00:00 IST"
         day_end_ist   = f"{display_date.strftime('%d %b %Y')}  23:59 IST"
 
-        embed = discord.Embed(
-            title=f"📋  {week['label']}  —  {week_progress}  —  {today.isoformat()}",
-            description=(
-                f"⏰  Points window: `{day_start_ist}` → `{day_end_ist}`\n"
-            ),
-            color=COLOR_INFO,
+        embed = _brand(
+            title=f"__{week['label']}__  ·  {week_progress}  ·  {today.isoformat()}",
+            desc=f"Points window  ·  `{day_start_ist}` → `{day_end_ist}`",
+            color=CLR_MATCH,
+            banner=True,
         )
-        if ctx.guild.icon:
-            embed.set_author(name=ctx.guild.name, icon_url=ctx.guild.icon.url)
+
+        def _fmt_section(probs):
+            lines = []
+            for i, prob in enumerate(probs, 1):
+                adapter = P.get(prob["platform"])
+                pemoji  = PLATFORM_EMOJIS.get(prob["platform"], "⚪")
+                demoji  = DIFF_EMOJIS.get(prob["difficulty"], "⚪")
+                url     = adapter.problem_url(prob["problem_id"]) if adapter else None
+                if url:
+                    problem_link = f"[**{prob['problem_id']}**]({url})"
+                else:
+                    problem_link = f"**`{prob['problem_id']}`**"
+                lines.append(
+                    f"`{i}.`  {pemoji}  {problem_link}\n"
+                    f"       {demoji} {prob['difficulty'].capitalize()}  ·  "
+                    f"**{prob['points']} pts**"
+                )
+            return "\n\n".join(lines)
 
         if not todays_probs:
             # Check if week has ANY problems
             if not all_probs:
                 embed.add_field(
-                    name="No problems this week yet",
+                    name="__No problems this week yet__",
                     value=(
                         "Admins can add problems with:\n"
                         "`!addproblem <platform> <id> <difficulty> <YYYY-MM-DD>`"
@@ -263,61 +324,50 @@ class Problems(commands.Cog):
                 )
             else:
                 # Week has problems but none for today
-                # Find next day with problems
                 future_days = sorted(set(
                     p["assigned_date"] for p in all_probs
                     if p["assigned_date"] > today
                 ))
                 if future_days:
-                    next_day    = future_days[0]
-                    next_probs  = [p for p in all_probs if p["assigned_date"] == next_day]
+                    next_day   = future_days[0]
+                    next_probs = [p for p in all_probs if p["assigned_date"] == next_day]
                     embed.add_field(
-                        name="📭  No problems assigned for today",
+                        name="__No problems assigned for today__",
                         value=(
-                            f"Rest day! 💤\n\n"
-                            f"**Next problems:** `{next_day.strftime('%A, %d %b')}` "
-                            f"— {len(next_probs)} problem(s)"
+                            f"Rest day.\n\n"
+                            f"**Next problems**  ·  `{next_day.strftime('%A, %d %b')}`  ·  "
+                            f"{len(next_probs)} problem(s)"
                         ),
                         inline=False,
                     )
                 else:
                     embed.add_field(
-                        name="📭  No more problems this week",
-                        value="All days done! Wait for the next week to be set up.",
+                        name="__No more problems this week__",
+                        value="All days done. Wait for the next week to be set up.",
                         inline=False,
                     )
         else:
-            # Show today's problems
-            lines = []
-            for i, prob in enumerate(todays_probs, 1):
-                adapter = P.get(prob["platform"])
-                pemoji  = PLATFORM_EMOJIS.get(prob["platform"], "⚪")
-                demoji  = DIFF_EMOJIS.get(prob["difficulty"], "⚪")
-                url     = adapter.problem_url(prob["problem_id"]) if adapter else None
-
-                if url:
-                    problem_link = f"[**{prob['problem_id']}**]({url})"
-                else:
-                    problem_link = f"**`{prob['problem_id']}`**"
-
-                lines.append(
-                    f"`{i}.`  {pemoji}  {problem_link}\n"
-                    f"       {demoji} {prob['difficulty'].capitalize()}  ·  "
-                    f"**{prob['points']} pts**  ·  DB `#{prob['id']}`"
+            # DSA first, then CP — each section fresh 1,2,3 numbering
+            if dsa_probs:
+                embed.add_field(
+                    name=f"__DSA__  ·  {len(dsa_probs)} problem(s)",
+                    value=_fmt_section(dsa_probs),
+                    inline=False,
                 )
-
-            embed.add_field(
-                name=f"🎯  {len(todays_probs)} Problem(s) for Today",
-                value="\n\n".join(lines),
-                inline=False,
-            )
+            if cp_probs:
+                embed.add_field(
+                    name=f"__CP__  ·  {len(cp_probs)} problem(s)",
+                    value=_fmt_section(cp_probs),
+                    inline=False,
+                )
 
         total_today = len(todays_probs)
         embed.set_footer(
             text=(
                 f"{total_today} problem(s) today  ·  "
                 f"Use !check to verify solves  ·  Points only awarded today"
-            )
+            ),
+            icon_url=BOT_LOGO,
         )
         await ctx.send(embed=embed)
 
@@ -350,15 +400,15 @@ class Problems(commands.Cog):
             await q.set_problem_difficulty(conn, problem_db_id, difficulty, points)
 
         demoji = DIFF_EMOJIS.get(difficulty.lower(), "⚪")
-        embed  = discord.Embed(
-            title="✅  Difficulty Updated",
-            description=(
-                f"Problem `#{problem_db_id}` (`{prob['platform'].upper()} {prob['problem_id']}`)\n"
+        embed  = _brand(
+            title="__Difficulty Updated__",
+            desc=(
+                f"Problem  ·  DB `#{problem_db_id}`  ·  `{prob['platform'].upper()} {prob['problem_id']}`\n"
                 f"{demoji}  **{difficulty.capitalize()}**  →  **{points} pts**"
             ),
-            color=COLOR_SUCCESS,
+            color=CLR_WIN,
         )
-        embed.set_footer(text=f"By {ctx.author.display_name}")
+        embed.set_footer(text=f"By {ctx.author.display_name}", icon_url=BOT_LOGO)
         await ctx.send(embed=embed)
 
     # ── !removeifunsolved (alias: !rius) ────────────────────────────────────
@@ -379,7 +429,7 @@ class Problems(commands.Cog):
         if problem_db_id is None:
             await ctx.send(
                 "**Usage:** `!removeifunsolved <db_id>`  ·  Alias: `!rius <db_id>`\n"
-                "Find DB IDs with `!problems`"
+                "DB IDs are shown in the `!addproblem` confirmation embed."
             )
             return
 
@@ -391,15 +441,14 @@ class Problems(commands.Cog):
 
         if not problem or str(problem["guild_id"]) != guild_id:
             await ctx.send(
-                f"❌  Problem `#{problem_db_id}` not found in this server.\n"
-                "Use `!problems` to see today's problem IDs."
+                f"❌  Problem `#{problem_db_id}` not found in this server."
             )
             return
 
         pemoji     = PLATFORM_EMOJIS.get(problem["platform"], "⚪")
         prob_label = (
             f"{pemoji}  `{problem['platform'].upper()} {problem['problem_id']}`"
-            + (f"  —  {problem['title']}" if problem.get("title") else "")
+            + (f"  ·  {problem['title']}" if problem.get("title") else "")
         )
 
         async with pool.acquire() as conn:
@@ -410,16 +459,16 @@ class Problems(commands.Cog):
             async with pool.acquire() as conn:
                 await q.hard_remove_problem(conn, problem_db_id, guild_id)
 
-            embed = discord.Embed(
-                title="🗑️  Problem Removed",
-                description=(
-                    f"{prob_label}\n\n"
-                    "✅  Deleted cleanly — **no solves were affected** "
+            embed = _brand(
+                title="__Problem Removed__",
+                desc=(
+                    f"{prob_label}  ·  DB `#{problem_db_id}`\n\n"
+                    "Deleted cleanly — **no solves were affected** "
                     "(nobody had solved this problem yet)."
                 ),
-                color=COLOR_SUCCESS,
+                color=CLR_WIN,
             )
-            embed.set_footer(text=f"Removed by {ctx.author.display_name}")
+            embed.set_footer(text=f"Removed by {ctx.author.display_name}", icon_url=BOT_LOGO)
             await ctx.send(embed=embed)
             return
 
@@ -443,19 +492,19 @@ class Problems(commands.Cog):
                 f"• **{name}**  (−{row['points_awarded']} pts will be reversed)"
             )
 
-        warn_embed = discord.Embed(
-            title="⚠️  Problem Already Solved — Force Remove?",
-            description=(
-                f"**Problem:** {prob_label}\n"
+        warn_embed = _brand(
+            title="__Problem Already Solved — Force Remove?__",
+            desc=(
+                f"**Problem:** {prob_label}  ·  DB `#{problem_db_id}`\n"
                 f"**Assigned date:** `{problem['assigned_date']}`\n\n"
                 f"**{solve_count} member(s) already solved this:**\n"
                 + "\n".join(solver_lines)
                 + "\n\nDeleting this problem will **remove their solve records and reverse all points**.\n\n"
                 "Type `confirm` within 30 s to proceed, or anything else to cancel."
             ),
-            color=COLOR_WARN,
+            color=CLR_RESULT,
         )
-        warn_embed.set_footer(text="This action cannot be undone.")
+        warn_embed.set_footer(text="This action cannot be undone.", icon_url=BOT_LOGO)
         await ctx.send(embed=warn_embed)
 
         def check(m):
@@ -478,16 +527,16 @@ class Problems(commands.Cog):
         async with pool.acquire() as conn:
             await q.hard_remove_problem(conn, problem_db_id, guild_id)
 
-        embed = discord.Embed(
-            title="🗑️  Problem Force-Removed",
-            description=(
-                f"{prob_label}\n\n"
+        embed = _brand(
+            title="__Problem Force-Removed__",
+            desc=(
+                f"{prob_label}  ·  DB `#{problem_db_id}`\n\n"
                 f"Deleted along with **{solve_count}** solve record(s).\n"
                 "Points awarded for this problem have been reversed."
             ),
-            color=COLOR_SUCCESS,
+            color=CLR_WIN,
         )
-        embed.set_footer(text=f"Force-removed by {ctx.author.display_name}")
+        embed.set_footer(text=f"Force-removed by {ctx.author.display_name}", icon_url=BOT_LOGO)
         await ctx.send(embed=embed)
 
 

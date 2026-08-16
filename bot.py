@@ -36,6 +36,48 @@ intents.members = True          # Required for on_member_join + inactivity
 
 bot = commands.Bot(command_prefix=config.PREFIX, intents=intents, help_command=None)
 
+# ── Help webhook branding ─────────────────────────────────────────────────
+# Same pattern as cogs/duels.py's Z4s webhook: a custom name + avatar for the
+# message OUTSIDE the embed, kept separate from the logo used INSIDE the
+# embed (thumbnail/author icon).
+HELP_WEBHOOK_NAME = "Your Helper"
+HELP_EMBED_LOGO = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats.webp"
+HELP_WEBHOOK_AVATAR = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Zodiac_Z408.png"
+
+_help_webhook_cache: dict[int, discord.Webhook] = {}
+
+
+async def _get_help_webhook(channel) -> discord.Webhook | None:
+    """Get or create the branded webhook for this channel."""
+    if channel.id in _help_webhook_cache:
+        return _help_webhook_cache[channel.id]
+    try:
+        webhooks = await channel.webhooks()
+        for wh in webhooks:
+            if wh.name == HELP_WEBHOOK_NAME:
+                _help_webhook_cache[channel.id] = wh
+                return wh
+        wh = await channel.create_webhook(name=HELP_WEBHOOK_NAME)
+        _help_webhook_cache[channel.id] = wh
+        return wh
+    except Exception as e:
+        print(f"[HELP_WEBHOOK] couldn't get/create webhook: {e}", flush=True)
+        return None
+
+
+async def _send_help_branded(channel, embed: discord.Embed):
+    """Send via webhook for the custom name + avatar; falls back to a
+    normal bot message if webhook creation/send fails for any reason
+    (e.g. missing Manage Webhooks permission)."""
+    wh = await _get_help_webhook(channel)
+    if wh:
+        try:
+            return await wh.send(embed=embed, username=HELP_WEBHOOK_NAME,
+                                 avatar_url=HELP_WEBHOOK_AVATAR, wait=True)
+        except Exception as e:
+            print(f"[HELP_WEBHOOK] send failed, falling back: {e}", flush=True)
+    return await channel.send(embed=embed)
+
 COGS = [
     "cogs.registry",
     "cogs.admin",
@@ -88,7 +130,7 @@ async def on_command_error(ctx, error):
 async def help_cmd(ctx, section: str = None):
     """Show member commands only. Admins: use !adminhelp for admin commands."""
 
-    header = discord.Embed(
+    em = discord.Embed(
         title="",
         description=(
             "```ansi\n"
@@ -99,30 +141,26 @@ async def help_cmd(ctx, section: str = None):
             "\u001b[1;36m╚██████╗██║\u001b[0m\n"
             "\u001b[1;36m ╚═════╝╚═╝\u001b[0m\n"
             "\n"
-            "\u001b[1;33m ██████╗  ██████╗ ████████╗\u001b[0m\n"
+            "\u001b[1;33m██████╗  ██████╗ ████████╗\u001b[0m\n"
             "\u001b[1;33m██╔══██╗██╔═══██╗╚══██╔══╝\u001b[0m\n"
             "\u001b[1;32m██████╔╝██║   ██║   ██║   \u001b[0m\n"
             "\u001b[1;32m██╔══██╗██║   ██║   ██║   \u001b[0m\n"
             "\u001b[1;36m██████╔╝╚██████╔╝   ██║   \u001b[0m\n"
             "\u001b[1;36m╚═════╝  ╚═════╝    ╚═╝   \u001b[0m\n"
             "```\n"
-            "> 🏆  Competitive Programming Practice Tracker\n"
+            "> 🏆  **Competitive Programming Practice Tracker**\n"
             "> Multi-platform · Daily/Weekly/Monthly leaderboards · 1v1 Duels\n"
-            f"\n"
-            f"```\n"
+            "\n"
+            "```\n"
             f"  Prefix    {config.PREFIX}\n"
-            f"  Platforms cf  ·  lc  ·  cc  ·  atcoder\n"
-            f"```"
+            "  Platforms cf  ·  lc  ·  cc  ·  atcoder\n"
+            "```"
         ),
         color=0x5865F2,
     )
-    header.set_author(name="CP Practice Bot  —  Command Reference",
-                      icon_url=bot.user.display_avatar.url)
-    header.set_thumbnail(url=bot.user.display_avatar.url)
+    em.set_author(name="Command Reference", icon_url=HELP_EMBED_LOGO)
 
-    # ── Registration ──────────────────────────────────────────────────────────
-    reg = discord.Embed(title="👤  Registration", color=0x7289DA)
-    reg.add_field(name="\u200b", value=(
+    em.add_field(name="__👤 Registration__", value=(
         "```\n"
         "!register <platform> <handle>   Link your handle\n"
         "!unregister <platform>          Remove a handle\n"
@@ -131,31 +169,24 @@ async def help_cmd(ctx, section: str = None):
         "```"
     ), inline=False)
 
-    # ── Verification ──────────────────────────────────────────────────────────
-    verif = discord.Embed(title="🔐  Verification", color=0x5865F2)
-    verif.add_field(name="🙋  Member", value=(
+    em.add_field(name="__🔐 Verification__", value=(
         "```\n"
         "Automatic on join → Check #verification channel\n"
         "```"
     ), inline=False)
 
-    # ── Problems ──────────────────────────────────────────────────────────────
-    problems = discord.Embed(title="📅  Problems", color=0x57F287)
-    problems.add_field(name="\u200b", value=(
+    em.add_field(name="__📅 Problems__", value=(
         "```\n"
         "!problems    This week's schedule, grouped by day\n"
         "```"
     ), inline=False)
 
-    # ── Solve Checking ────────────────────────────────────────────────────────
-    checking = discord.Embed(title="🔍  Solve Checking", color=0xFEE75C)
-    checking.add_field(name="\u200b", value=(
+    em.add_field(name="__🔍 Solve Checking__", value=(
         "```\n"
         "!check [@user]                  Check today's solve status\n"
         "!submissions <plat> [n] [@user] Browse recent submissions\n"
-        "```"
-    ), inline=False)
-    checking.add_field(name="⏱️  Auto-check schedule", value=(
+        "```\n"
+        "**Auto-check schedule**\n"
         "```\n"
         "23:58 IST   Auto-checkall (before day closes)\n"
         "Every 6 h   Silent background point award\n"
@@ -163,14 +194,57 @@ async def help_cmd(ctx, section: str = None):
         "> 💡 **Tip:** `!check` is instant — auto is just a safety net."
     ), inline=False)
 
-    # ── Leaderboards ──────────────────────────────────────────────────────────
-    lb = discord.Embed(title="🏆  Leaderboards", color=0xF1C40F)
-    lb.add_field(name="\u200b", value=(
+    em.add_field(name="__⚔️ Duels — Challenge & Play__", value=(
+        "```\n"
+        "!duel @user cp                  Challenge a player, DUEL mode (3-problem)\n"
+        "!blitz @user cp                 Challenge a player, BLITZ mode (3-problem)\n"
+        "!duel @user cp 2                Challenge a player, DUEL mode (2-problem)\n"
+        "!blitz @user cp 2               Challenge a player, BLITZ mode (2-problem)\n"
+        "```\n"
+        "> `!duel` is always **DUEL** mode, `!blitz` is always **BLITZ** mode — "
+        "the command name is the only thing that sets it, no extra token needed.\n"
+        "> Format is optional (defaults to **3**-problem) — if you do specify it, "
+        "only `2` or `3` are valid.\n"
+        "> There's no manual bot match — challenge a player, and if they don't "
+        "respond in time you're **auto-matched against the bot** automatically."
+    ), inline=False)
+
+    em.add_field(name="__⚔️ Duels — Ratings & Stats__", value=(
+        "```\n"
+        "!duelprofile [@user]            Your (or someone's) DUEL ratings (CP/DSA/ICPC)\n"
+        "!blitzprofile [@user]           Your (or someone's) BLITZ ratings (CP/DSA/ICPC)\n"
+        "!duel [cp|dsa|icpc] leaderboard  Top DUEL players in a family\n"
+        "!blitz [cp|dsa|icpc] leaderboard Top BLITZ players in a family\n"
+        "!duel [cp|dsa|icpc] rank        Your DUEL rank/tier\n"
+        "!blitz [cp|dsa|icpc] rank       Your BLITZ rank/tier\n"
+        "```\n"
+        "> Same `!duel`/`!blitz` commands used to challenge — add `leaderboard` "
+        "or `rank` instead of an opponent, family + keyword in any order, "
+        "e.g. `!duel cp leaderboard` or `!duel leaderboard cp`.\n"
+        "> Leave the family out for `!duel rank`/`!blitz rank` to see **all "
+        "families**, or for `leaderboard` to default to **CP**."
+    ), inline=False)
+
+    em.add_field(name="__⚔️ Duels — Format & Modes__", value=(
+        "```\n"
+        "2-Problem Format   Medium + Medium\n"
+        "3-Problem Format   Easy + Medium + Hard (Bo3)\n"
+        "\n"
+        "cp    blitz · duel      Codeforces  (real Elo)\n"
+        "dsa   blitz · duel      LeetCode    (fixed points)\n"
+        "icpc  blitz · duel      ICPC-style  (Codeforces problems, real Elo)\n"
+        "\n"
+        "Tiers: Newbie (800) → Pupil → Specialist → Expert →\n"
+        "Master → GM → LGM (3000+)\n"
+        "```\n"
+        "> Tip: `!blitz @user <family> 2` or `!duel @user <family> 2` for quick 2-problem matches!"
+    ), inline=False)
+
+    em.add_field(name="__🏆 Leaderboards__", value=(
         "```\n"
         "!leaderboard           Daily + Weekly + Monthly in one view\n"
-        "```"
-    ), inline=False)
-    lb.add_field(name="🔄  Reset schedule", value=(
+        "```\n"
+        "**Reset schedule**\n"
         "```\n"
         "Daily    midnight IST (auto)\n"
         "Weekly   active week's end-date\n"
@@ -178,66 +252,19 @@ async def help_cmd(ctx, section: str = None):
         "```"
     ), inline=False)
 
-    # ── Duels (UPDATED) ────────────────────────────────────────────────────────
-    duels = discord.Embed(title="⚔️  Duels", color=0xED4245)
-    duels.add_field(name="Challenge & Play", value=(
+    em.add_field(name="__ℹ️ Good to know__", value=(
         "```\n"
-        "!duel @user cp_blitz            Challenge a player (3-problem format)\n"
-        "!duel @user cp_blitz 2          Challenge a player (2-problem format)\n"
-        "!duel bot cp_blitz              Bot match (3 problems, your rating)\n"
-        "!duel bot cp_blitz 2            Bot match (2 problems)\n"
-        "!duel bot cp_blitz 1600         Bot match at 1600 rating (3 problems)\n"
-        "!duel bot cp_blitz 2 1600       Bot match (2 problems, 1600 rating)\n"
+        "⏱  Points valid only on the problem's assigned day (00:00–23:59 IST)\n"
+        "🔁  Daily board resets automatically at midnight IST\n"
+        "🤖  Auto-checkall runs at 23:58 IST — !check gives instant results\n"
+        "🔐  New members must verify via LinkedIn before accessing the server\n"
+        "⚔️  Duel matches create private channels — only players + admins see them\n"
         "```"
-    ), inline=False)
-    duels.add_field(name="View Ratings & Stats", value=(
-        "```\n"
-        "!duelprofile [@user]            Your (or someone's) duel ratings\n"
-        "!duelrank [mode]                Your rank/tier in a mode\n"
-        "```"
-    ), inline=False)
-    duels.add_field(name="Format & Difficulty", value=(
-        "```\n"
-        "2-Problem Format: Medium + Medium\n"
-        "3-Problem Format: Easy + Medium + Hard (Bo3)\n"
-        "\n"
-        "Applies to all modes: cp_blitz, cp_duel, dsa_blitz,\n"
-        "dsa_duel, icpc_blitz, icpc_duel\n"
-        "```"
-    ), inline=False)
-    duels.add_field(name="Modes & Ratings", value=(
-        "```\n"
-        "cp_blitz  cp_duel                Codeforces (real Elo)\n"
-        "dsa_blitz dsa_duel               LeetCode (fixed points)\n"
-        "icpc_blitz icpc_duel             ICPC: math + algo (real Elo)\n"
-        "\n"
-        "Tiers: Newbie (800) → Pupil → Specialist → Expert →\n"
-        "Master → GM → LGM (3000+)\n"
-        "```\n"
-        "> Tip: `!duel bot <mode> 2` for quick 2-problem matches!"
     ), inline=False)
 
-    # ── Footer ────────────────────────────────────────────────────────────────
-    footer = discord.Embed(
-        description=(
-        "```\n"
-            "⏱  Points valid only on the problem's assigned day  (00:00 – 23:59 IST)\n"
-            "🔁  Daily board resets automatically at midnight IST\n"
-            "🤖  Auto-checkall runs at 23:58 IST — use !check for instant results\n"
-            "🔐  New members must verify via LinkedIn before accessing the server\n"
-            "⚔️  Duel matches create private channels — only players + admins see them\n"
-            "```"
-        ),
-        color=0x2B2D31,
-    )
-    footer.set_footer(
-        text=f"CP Practice Bot  •  {config.PREFIX}help  •  Made with ❤️",
-        icon_url=bot.user.display_avatar.url,
-    )
+    em.set_footer(text=f"{HELP_WEBHOOK_NAME}  •  {config.PREFIX}help  •  Made with ❤️")
 
-    await ctx.send(embeds=[
-        header, reg, verif, problems, checking, duels, lb, footer
-    ])
+    await _send_help_branded(ctx.channel, em)
 
 
 # ── !adminhelp  (ADMIN-ONLY — refuses cleanly for everyone else) ─────────────
@@ -342,10 +369,12 @@ async def admin_help_cmd(ctx):
 
     # ── Duels — Admin (UPDATED) ────────────────────────────────────────────────
     admin_duel = discord.Embed(title="⚔️  Duels — Admin", color=0xED4245)
-    admin_duel.add_field(name="Rating Management", value=(
+    admin_duel.add_field(name="__Rating Management__", value=(
         "```\n"
         "!duelsetrank @user <mode> <rating>  Set someone's duel rating\n"
-        "```"
+        "```\n"
+        "> `<mode>` here is the combined form: cp_blitz, cp_duel, dsa_blitz,\n"
+        "> dsa_duel, icpc_blitz, icpc_duel."
     ), inline=False)
 
     admin_rst = discord.Embed(title="🔄  Reset", color=0x99AAB5)
