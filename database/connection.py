@@ -18,10 +18,12 @@ import asyncpg
 import config
 
 _pool: asyncpg.Pool | None = None
+_cf_pool: asyncpg.Pool | None = None
+_lc_pool: asyncpg.Pool | None = None
 
 
 async def init_pool() -> asyncpg.Pool:
-    global _pool
+    global _pool, _cf_pool, _lc_pool
     _pool = await asyncpg.create_pool(
         dsn=config.DATABASE_URL,
         min_size=2,
@@ -29,6 +31,37 @@ async def init_pool() -> asyncpg.Pool:
         command_timeout=30,
         statement_cache_size=0,   # Required for Supabase/PgBouncer transaction mode
     )
+
+    # Initialize CF Neon DB Pool
+    try:
+        cf_url = getattr(config, "DATABASE_URL_CF", "")
+        if cf_url:
+            _cf_pool = await asyncpg.create_pool(
+                dsn=cf_url,
+                min_size=1,
+                max_size=10,
+                command_timeout=15,
+                statement_cache_size=0,
+            )
+            print("[db] CF Neon DB pool initialized successfully.")
+    except Exception as e:
+        print(f"[db] CF Neon DB pool init error: {e}")
+
+    # Initialize LC Neon DB Pool
+    try:
+        lc_url = getattr(config, "DATABASE_URL_LC", "")
+        if lc_url:
+            _lc_pool = await asyncpg.create_pool(
+                dsn=lc_url,
+                min_size=1,
+                max_size=10,
+                command_timeout=15,
+                statement_cache_size=0,
+            )
+            print("[db] LC Neon DB pool initialized successfully.")
+    except Exception as e:
+        print(f"[db] LC Neon DB pool init error: {e}")
+
     try:
         from database import duel_queries
         async with _pool.acquire() as conn:
@@ -55,16 +88,30 @@ async def init_pool() -> asyncpg.Pool:
 
 
 async def close_pool():
-    global _pool
+    global _pool, _cf_pool, _lc_pool
     if _pool:
         await _pool.close()
         _pool = None
+    if _cf_pool:
+        await _cf_pool.close()
+        _cf_pool = None
+    if _lc_pool:
+        await _lc_pool.close()
+        _lc_pool = None
 
 
 def get_pool() -> asyncpg.Pool:
     if _pool is None:
         raise RuntimeError("DB pool not initialised. Call init_pool() first.")
     return _pool
+
+
+def get_cf_pool() -> asyncpg.Pool | None:
+    return _cf_pool
+
+
+def get_lc_pool() -> asyncpg.Pool | None:
+    return _lc_pool
 
 
 async def ping_db():

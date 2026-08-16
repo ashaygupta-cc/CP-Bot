@@ -19,11 +19,13 @@ import os
 import json
 import asyncio
 import datetime as dt
+import re
+import time
 import discord
 import aiohttp
 from aiohttp import web
 
-from database.connection import get_pool, ping_db
+from database.connection import get_pool, get_cf_pool, get_lc_pool, ping_db
 from database import queries, duel_queries
 import config
 
@@ -140,10 +142,24 @@ async def health(request: web.Request) -> web.Response:
 
 
 async def daily_problems(request: web.Request) -> web.Response:
-    """GET /api/problems?limit=30&platform=codeforces
-    Public view of the daily problem feed the bot posts."""
-    limit = min(int(request.query.get("limit", 30)), 100)
-    platform = request.query.get("platform")
+    """GET /api/problems?limit=60&platform=codeforces|leetcode&search=...&difficulty=...
+    Public view of daily problem feed and problem catalog."""
+    limit = min(int(request.query.get("pageSize") or request.query.get("limit") or 60), 500)
+    page = max(int(request.query.get("page", 1)), 1)
+    offset = (page - 1) * limit
+
+    raw_platform = (request.query.get("platform") or "").strip().lower()
+    search = (request.query.get("search") or "").strip()
+    difficulty = (request.query.get("difficulty") or "").strip()
+
+    platforms = None
+    if raw_platform in ("codeforces", "cf"):
+        platforms = ["codeforces", "cf"]
+    elif raw_platform in ("leetcode", "lc"):
+        platforms = ["leetcode", "lc"]
+    elif raw_platform:
+        platforms = [raw_platform]
+
     sql = """
         SELECT p.id, p.platform, p.problem_id, p.title, p.difficulty,
                p.points, p.assigned_date, p.set_by,
@@ -153,14 +169,73 @@ async def daily_problems(request: web.Request) -> web.Response:
         FROM problems p
         LEFT JOIN weeks  w ON w.id = p.week_id
         LEFT JOIN months m ON m.id = p.month_id
-        WHERE p.guild_id = $1
-          AND ($2::text IS NULL OR p.platform = $2)
-        ORDER BY p.assigned_date DESC, p.id DESC
-        LIMIT $3
+        WHERE ($1::text[] IS NULL OR LOWER(p.platform) = ANY($1::text[]) OR p.platform IS NULL OR p.platform = '')
+          AND ($2::text IS NULL OR p.guild_id = $2 OR p.guild_id IS NULL OR p.guild_id = '')
+          AND ($3::text IS NULL OR $3 = '' OR LOWER(p.title) LIKE '%' || LOWER($3) || '%' OR LOWER(p.problem_id) LIKE '%' || LOWER($3) || '%')
+          AND ($4::text IS NULL OR $4 = '' OR LOWER(p.difficulty) = LOWER($4))
+        ORDER BY p.assigned_date DESC NULLS LAST, p.id DESC
+        LIMIT $5 OFFSET $6
     """
+
+    count_sql = """
+        SELECT COUNT(*) FROM problems p
+        WHERE ($1::text[] IS NULL OR LOWER(p.platform) = ANY($1::text[]) OR p.platform IS NULL OR p.platform = '')
+          AND ($2::text IS NULL OR p.guild_id = $2 OR p.guild_id IS NULL OR p.guild_id = '')
+          AND ($3::text IS NULL OR $3 = '' OR LOWER(p.title) LIKE '%' || LOWER($3) || '%' OR LOWER(p.problem_id) LIKE '%' || LOWER($3) || '%')
+          AND ($4::text IS NULL OR $4 = '' OR LOWER(p.difficulty) = LOWER($4))
+    """
+
     async with get_pool().acquire() as conn:
-        recs = await conn.fetch(sql, _guild(request), platform, limit)
-    return _json({"problems": _rows(recs)})
+        recs = await conn.fetch(sql, platforms, _guild(request), search, difficulty, limit, offset)
+        total = await conn.fetchval(count_sql, platforms, _guild(request), search, difficulty) or len(recs)
+
+    pages = max(1, (total + limit - 1) // limit)
+
+    import re
+    problem_list = []
+    for r in recs:
+        d = dict(r)
+        pid = str(d.get("problem_id") or d.get("id") or "")
+        d["key"] = pid
+
+        m = re.match(r"^(\d+)([A-Za-z0-9]+)$", pid)
+        if m:
+            d["contestId"] = int(m.group(1))
+            d["index"] = m.group(2)
+        else:
+            d["contestId"] = 0
+            d["index"] = pid
+
+        points = d.get("points") or 0
+        diff = (d.get("difficulty") or "medium").lower()
+        if points >= 500:
+            d["rating"] = points
+        elif diff == "easy":
+            d["rating"] = 800
+        elif diff == "medium":
+            d["rating"] = 1200
+        elif diff == "hard":
+            d["rating"] = 1600
+        elif diff in ("expert", "master"):
+            d["rating"] = 2000
+        else:
+            d["rating"] = 1200
+
+        plat_label = d.get("platform") or "CP"
+        d["tags"] = [diff.capitalize(), plat_label.upper()]
+        d["judgeable"] = True
+
+        if not d.get("title") or d["title"].strip() == pid:
+            d["title"] = f"Problem {pid}"
+
+        problem_list.append(d)
+
+    return _json({
+        "problems": problem_list,
+        "total": total,
+        "page": page,
+        "pages": pages
+    })
 
 
 async def problem_solvers(request: web.Request) -> web.Response:
@@ -1666,12 +1741,8 @@ async def delete_community_comment_api(request: web.Request) -> web.Response:
 
 async def discord_login_api(request: web.Request) -> web.Response:
     client_id = os.getenv("DISCORD_CLIENT_ID", "1519084550226051102")
-    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or "www.binarybeats.in"
-    scheme = request.headers.get("X-Forwarded-Proto", "https")
-    if "localhost" in host:
-        scheme = "http"
+    redirect_uri = os.getenv("DISCORD_REDIRECT_URI", "https://www.binarybeats.in/api/discord/callback")
 
-    redirect_uri = f"{scheme}://{host}/api/discord/callback"
     from urllib.parse import quote
     auth_url = (
         f"https://discord.com/oauth2/authorize?client_id={client_id}"
@@ -1684,14 +1755,8 @@ async def discord_callback_api(request: web.Request) -> web.Response:
     code = request.query.get("code")
     client_id = os.getenv("DISCORD_CLIENT_ID", "1519084550226051102")
     client_secret = os.getenv("DISCORD_CLIENT_SECRET", "HB8O8piuilNlr94nCq02cmu1Hg7vuTJx")
-    
-    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or "www.binarybeats.in"
-    scheme = request.headers.get("X-Forwarded-Proto", "https")
-    if "localhost" in host:
-        scheme = "http"
-
-    redirect_uri = f"{scheme}://{host}/api/discord/callback"
-    origin_base = f"{scheme}://{host}"
+    redirect_uri = os.getenv("DISCORD_REDIRECT_URI", "https://www.binarybeats.in/api/discord/callback")
+    origin_base = "https://www.binarybeats.in"
 
     if not code:
         raise web.HTTPFound(location=f"{origin_base}/?auth=error")
@@ -1706,7 +1771,8 @@ async def discord_callback_api(request: web.Request) -> web.Response:
                 "redirect_uri": redirect_uri
             }) as resp:
                 if resp.status != 200:
-                    print(f"[api/discord/callback] Token error status: {resp.status}")
+                    err_body = await resp.text()
+                    print(f"[api/discord/callback] Token error status: {resp.status}, body: {err_body}")
                     raise web.HTTPFound(location=f"{origin_base}/?auth=token_error")
                 token_data = await resp.json()
                 access_token = token_data.get("access_token")
@@ -1727,7 +1793,9 @@ async def discord_callback_api(request: web.Request) -> web.Response:
             "id": user.get("id"),
             "username": user.get("username"),
             "globalName": user.get("global_name") or user.get("username"),
-            "avatarUrl": avatar_url
+            "avatarUrl": avatar_url,
+            "isMember": True,
+            "roles": ["Member"]
         }
 
         response = web.HTTPFound(location=f"{origin_base}/")
@@ -1757,6 +1825,643 @@ async def discord_logout_api(request: web.Request) -> web.Response:
     return response
 
 
+async def leetcode_status_api(request: web.Request) -> web.Response:
+    return _json({"status": "ok", "platform": "leetcode"})
+
+
+# ───────────────────────────── CODEFORCES API PROXY ─────────────────────────────
+
+async def cf_user_api(request: web.Request) -> web.Response:
+    handles = request.match_info.get("handles", "")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://codeforces.com/api/user.info?handles={handles}") as resp:
+                if resp.status != 200:
+                    return _json({"error": "user_not_found"}, status=404)
+                data = await resp.json()
+                if data.get("status") == "OK":
+                    users = [{
+                        "handle": u.get("handle"),
+                        "rating": u.get("rating"),
+                        "maxRating": u.get("maxRating"),
+                        "rank": u.get("rank")
+                    } for u in data.get("result", [])]
+                    return _json({"users": users})
+    except Exception as e:
+        print(f"[cf_user_api] Exception: {e}")
+    return _json({"error": "cf_api_error"}, status=500)
+
+
+async def cf_status_api(request: web.Request) -> web.Response:
+    handle = request.match_info.get("handle", "")
+    count = request.query.get("count", "50")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://codeforces.com/api/user.status?handle={handle}&from=1&count={count}") as resp:
+                if resp.status != 200:
+                    return _json({"submissions": []})
+                data = await resp.json()
+                if data.get("status") == "OK":
+                    submissions = [{
+                        "id": s.get("id"),
+                        "creationTimeSeconds": s.get("creationTimeSeconds"),
+                        "verdict": s.get("verdict"),
+                        "problem": {"contestId": s.get("problem", {}).get("contestId", 0), "index": s.get("problem", {}).get("index", "")}
+                    } for s in data.get("result", [])]
+                    return _json({"submissions": submissions})
+    except Exception as e:
+        print(f"[cf_status_api] Exception: {e}")
+    return _json({"submissions": []})
+
+
+async def cf_rating_history_api(request: web.Request) -> web.Response:
+    handle = request.match_info.get("handle", "")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://codeforces.com/api/user.rating?handle={handle}") as resp:
+                if resp.status != 200:
+                    return _json({"history": []})
+                data = await resp.json()
+                if data.get("status") == "OK":
+                    history = [{
+                        "contestId": r.get("contestId"),
+                        "contestName": r.get("contestName"),
+                        "newRating": r.get("newRating"),
+                        "oldRating": r.get("oldRating"),
+                        "ratingUpdateTimeSeconds": r.get("ratingUpdateTimeSeconds")
+                    } for r in data.get("result", [])]
+                    return _json({"history": history})
+    except Exception as e:
+        print(f"[cf_rating_history_api] Exception: {e}")
+    return _json({"history": []})
+
+
+_CF_PROBLEMS_CACHE = {}
+_CF_CACHE_TIME = 0
+
+
+async def _fetch_cf_problem_meta(contest_id: int, idx: str) -> dict:
+    global _CF_PROBLEMS_CACHE, _CF_CACHE_TIME
+    now = time.time()
+    if not _CF_PROBLEMS_CACHE or (now - _CF_CACHE_TIME > 3600):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://codeforces.com/api/problemset.problems") as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("status") == "OK":
+                            for p in data.get("result", {}).get("problems", []):
+                                p_cid = p.get("contestId")
+                                p_idx = p.get("index")
+                                if p_cid and p_idx:
+                                    _CF_PROBLEMS_CACHE[f"{p_cid}{p_idx}".upper()] = p
+                            _CF_CACHE_TIME = now
+        except Exception as e:
+            print(f"[_fetch_cf_problem_meta] Error: {e}")
+    return _CF_PROBLEMS_CACHE.get(f"{contest_id}{idx}".upper(), {})
+
+
+async def _fetch_leetcode_meta(slug: str) -> dict:
+    slug = slug.lower().replace("lc-", "")
+    try:
+        query = """
+        query getQuestionDetail($titleSlug: String!) {
+          question(titleSlug: $titleSlug) {
+            questionId
+            title
+            content
+            difficulty
+            topicTags {
+              name
+            }
+            exampleTestcaseList
+          }
+        }
+        """
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://leetcode.com/graphql",
+                json={"query": query, "variables": {"titleSlug": slug}},
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Content-Type": "application/json"}
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    q = data.get("data", {}).get("question")
+                    if q:
+                        return q
+    except Exception as e:
+        print(f"[_fetch_leetcode_meta] Error: {e}")
+    return {}
+
+
+def _clean_html(html_str: str) -> str:
+    if not html_str:
+        return ""
+    s = html_str
+    # Strip LLM system prompt headers from Hugging Face / Neon DB raw rows
+    s = re.sub(r"^[\s\n]*You are an? expert [^\n]+\.?\s*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"^[\s\n]*###\s*Question:\s*", "", s, flags=re.IGNORECASE)
+
+    s = re.sub(r'<sup>([\s\S]*?)</sup>', r'^\1', s, flags=re.IGNORECASE)
+    s = re.sub(r'<sub>([\s\S]*?)</sub>', r'_\1', s, flags=re.IGNORECASE)
+    s = re.sub(r'<strong class="example">([\s\S]*?)</strong>', r'\n\n**\1**\n', s, flags=re.IGNORECASE)
+    s = re.sub(r'<pre[^>]*>([\s\S]*?)</pre>', r'\n\1\n', s, flags=re.IGNORECASE)
+    s = s.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+    s = re.sub(r"</p>", "\n\n", s, flags=re.IGNORECASE)
+    s = re.sub(r"</li>", "\n", s, flags=re.IGNORECASE)
+    s = re.sub(r"<li>", "• ", s, flags=re.IGNORECASE)
+    s = re.sub(r"<code>([\s\S]*?)</code>", r"`\1`", s, flags=re.IGNORECASE)
+    s = re.sub(r"<strong>([\s\S]*?)</strong>", r"**\1**", s, flags=re.IGNORECASE)
+    s = re.sub(r"<em>([\s\S]*?)</em>", r"*\1*", s, flags=re.IGNORECASE)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = s.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&quot;", '"').replace("&nbsp;", " ").replace("&#39;", "'")
+    return re.sub(r"\n{3,}", "\n\n", s).strip()
+
+
+async def _fetch_hardtests_dataset(key: str, contest_id: int, idx: str) -> dict:
+    queries = []
+    if contest_id and idx:
+        queries.append(f"pid='{contest_id}_{idx.upper()}'")
+        queries.append(f"pid='{contest_id}{idx.upper()}'")
+        queries.append(f"pid='codeforces_{contest_id}_{idx.upper()}'")
+        queries.append(f"pid='codeforces_{contest_id}{idx.upper()}'")
+        queries.append(f"url LIKE '%codeforces.com/problemset/problem/{contest_id}/{idx.upper()}%'")
+        queries.append(f"url LIKE '%codeforces.com/problemset/problem/{contest_id}/{idx.lower()}%'")
+    queries.append(f"pid='{key}'")
+
+    async def fetch_one(q: str):
+        params = {
+            "dataset": "sigcp/hardtests_problems",
+            "config": "default",
+            "split": "train",
+            "where": q,
+            "length": "1"
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=2.5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get("https://datasets-server.huggingface.co/filter", params=params) as resp:
+                    if resp.status == 200:
+                        body = await resp.json()
+                        if not body.get("error") and body.get("rows") and body["rows"][0].get("row"):
+                            return body["rows"][0]["row"]
+        except Exception:
+            pass
+        return None
+
+    tasks = [fetch_one(q) for q in queries]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for r in results:
+        if isinstance(r, dict) and r:
+            return r
+    return {}
+
+
+_CF_PROBLEMS_CACHE = {}
+
+async def _fetch_cf_problem_meta(contest_id: int, idx: str) -> dict:
+    global _CF_PROBLEMS_CACHE
+    cache_key = f"{contest_id}_{idx.upper()}"
+    if cache_key in _CF_PROBLEMS_CACHE:
+        return _CF_PROBLEMS_CACHE[cache_key]
+
+    url = "https://codeforces.com/api/problemset.problems"
+    try:
+        timeout = aiohttp.ClientTimeout(total=4)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("status") == "OK":
+                        problems = data.get("result", {}).get("problems", [])
+                        for p in problems:
+                            ck = f"{p.get('contestId')}_{str(p.get('index')).upper()}"
+                            _CF_PROBLEMS_CACHE[ck] = p
+                        if cache_key in _CF_PROBLEMS_CACHE:
+                            return _CF_PROBLEMS_CACHE[cache_key]
+    except Exception as e:
+        print(f"[_fetch_cf_problem_meta err]: {e}")
+    return {}
+
+
+async def _fetch_leetcode_meta(key: str) -> dict:
+    slug = key.lower().replace("lc-", "").strip()
+    graphql_url = "https://leetcode.com/graphql"
+    query = """
+    query getQuestionDetail($titleSlug: String!) {
+      question(titleSlug: $titleSlug) {
+        questionId
+        title
+        titleSlug
+        content
+        difficulty
+        topicTags {
+          name
+          slug
+        }
+        codeSnippets {
+          lang
+          langSlug
+          code
+        }
+        exampleTestcaseList
+      }
+    }
+    """
+    payload = {
+        "query": query,
+        "variables": {"titleSlug": slug},
+        "operationName": "getQuestionDetail"
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=5)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Content-Type": "application/json",
+            "Referer": f"https://leetcode.com/problems/{slug}/"
+        }
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(graphql_url, json=payload, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    q = data.get("data", {}).get("question")
+                    if q:
+                        return q
+    except Exception as e:
+        print(f"[_fetch_leetcode_meta err]: {e}")
+    return {}
+
+
+async def _fetch_cf_html(contest_id: int, idx: str) -> dict:
+    url = f"https://codeforces.com/problemset/problem/{contest_id}/{idx}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=4)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    result = {}
+                    m_title = re.search(r'<div class="title">\s*[A-Za-z0-9]+\.\s*(.*?)\s*</div>', html)
+                    if m_title:
+                        result["title"] = m_title.group(1).strip()
+
+                    m_statement = re.search(r'<div class="header">[\s\S]*?</div>([\s\S]*?)<div class="input-specification">', html)
+                    if m_statement:
+                        result["description"] = _clean_html(m_statement.group(1))
+
+                    m_in_fmt = re.search(r'<div class="input-specification">\s*<div class="section-title">Input</div>([\s\S]*?)</div>\s*<div class="output-specification">', html)
+                    if m_in_fmt:
+                        result["inputFormat"] = _clean_html(m_in_fmt.group(1))
+
+                    m_out_fmt = re.search(r'<div class="output-specification">\s*<div class="section-title">Output</div>([\s\S]*?)</div>\s*<div class="sample-tests">', html)
+                    if m_out_fmt:
+                        result["outputFormat"] = _clean_html(m_out_fmt.group(1))
+
+                    m_note = re.search(r'<div class="note">\s*<div class="section-title">Note</div>([\s\S]*?)</div>', html)
+                    if m_note:
+                        result["note"] = _clean_html(m_note.group(1))
+
+                    inputs = re.findall(r'<div class="input">\s*<div class="title">Input</div>\s*<pre>([\s\S]*?)</pre>', html)
+                    outputs = re.findall(r'<div class="output">\s*<div class="title">Output</div>\s*<pre>([\s\S]*?)</pre>', html)
+                    
+                    examples = []
+                    for inp, outp in zip(inputs, outputs):
+                        c_in = _clean_html(inp).strip()
+                        c_out = _clean_html(outp).strip()
+                        if c_in or c_out:
+                            examples.append({"input": c_in, "output": c_out})
+                    result["examples"] = examples
+                    return result
+    except Exception as e:
+        print(f"[_fetch_cf_html error]: {e}")
+    return {}
+
+
+async def problem_statement_api(request: web.Request) -> web.Response:
+    key = request.match_info.get("key", "").strip()
+    platform = (request.query.get("platform") or "").strip().lower()
+
+    if not key:
+        return _json({"error": "missing key"}, status=400)
+
+    try:
+        m = re.match(r"^(\d+)([A-Za-z0-9]+)$", key)
+        contest_id = int(m.group(1)) if m else 0
+        idx = m.group(2) if m else key
+
+        row = None
+        try:
+            async with get_pool().acquire() as conn:
+                row = await conn.fetchrow(
+                    """SELECT * FROM problems 
+                       WHERE LOWER(problem_id) = LOWER($1) OR id::text = $1 OR LOWER(title) = LOWER($1)
+                       LIMIT 1""", key
+                )
+        except Exception as err:
+            print(f"[problem_statement_api DB query error]: {err}")
+
+        title = f"Problem {key}"
+        difficulty = "medium"
+        rating = 1200
+        db_platform = platform or "codeforces"
+
+        if row:
+            title = row["title"] or f"Problem {key}"
+            difficulty = row["difficulty"] or "medium"
+            points = row.get("points") or 0
+            db_platform = row.get("platform") or platform or "codeforces"
+            if points >= 500:
+                rating = points
+            elif difficulty.lower() == "easy":
+                rating = 800
+            elif difficulty.lower() == "medium":
+                rating = 1200
+            elif difficulty.lower() == "hard":
+                rating = 1600
+            elif difficulty.lower() in ("expert", "master"):
+                rating = 2000
+
+        is_lc = "lc" in db_platform.lower() or "leetcode" in db_platform.lower() or key.startswith("LC-") or (not contest_id and "-" in key)
+        plat_name = "leetcode" if is_lc else "codeforces"
+        tags = [difficulty.capitalize(), plat_name.upper()]
+        description = ""
+        input_fmt = ""
+        output_fmt = ""
+        note_fmt = ""
+        examples = []
+        starter_code = ""
+
+        if is_lc:
+            # 1. Query LC Neon Database (2,641 problems)
+            try:
+                lc_pool = get_lc_pool()
+                if lc_pool:
+                    async with lc_pool.acquire() as conn:
+                        slug_key = key.lower().replace("lc-", "").strip()
+                        row_lc = await conn.fetchrow(
+                            """SELECT * FROM problems 
+                               WHERE LOWER(problem_key) = LOWER($1)
+                                  OR LOWER(problem_key) = 'lc-' || LOWER($1)
+                               LIMIT 1""", slug_key
+                        )
+                        if row_lc:
+                            d_lc = dict(row_lc)
+                            if d_lc.get("title"):
+                                title = d_lc["title"]
+                            if d_lc.get("rating"):
+                                rating = int(d_lc["rating"])
+                            if d_lc.get("tags"):
+                                raw_tags = d_lc["tags"]
+                                if isinstance(raw_tags, str):
+                                    try:
+                                        raw_tags = json.loads(raw_tags)
+                                    except Exception:
+                                        pass
+                                if isinstance(raw_tags, list):
+                                    tags = [str(t) for t in raw_tags]
+                            if d_lc.get("description"):
+                                description = _clean_html(d_lc["description"])
+                            if d_lc.get("examples"):
+                                raw_ex = d_lc["examples"]
+                                if isinstance(raw_ex, str):
+                                    try:
+                                        raw_ex = json.loads(raw_ex)
+                                    except Exception:
+                                        pass
+                                if isinstance(raw_ex, list):
+                                    examples = raw_ex
+            except Exception as err_lc_db:
+                print(f"[LC Neon DB query error]: {err_lc_db}")
+
+            # 2. Live GraphQL fetch for starterCode and extra details
+            try:
+                lc_meta = await _fetch_leetcode_meta(key)
+                if lc_meta:
+                    if not title or title == f"Problem {key}":
+                        title = lc_meta.get("title") or title
+                    diff_raw = lc_meta.get("difficulty") or "Medium"
+                    if not rating or rating == 1200:
+                        rating = 1200 if diff_raw == "Easy" else 1600 if diff_raw == "Medium" else 2100
+                    if not tags or tags == [difficulty.capitalize(), "LEETCODE"]:
+                        tags = [t.get("name") for t in lc_meta.get("topicTags", []) if t.get("name")] or tags
+                    if not description:
+                        description = _clean_html(lc_meta.get("content", ""))
+                    
+                    tc_list = lc_meta.get("exampleTestcaseList", [])
+                    if not examples and tc_list:
+                        for tc in tc_list[:3]:
+                            examples.append({"input": str(tc).strip(), "output": "Output evaluated upon submission"})
+                    
+                    snippets = lc_meta.get("codeSnippets", [])
+                    if isinstance(snippets, list):
+                        for snip in snippets:
+                            if isinstance(snip, dict) and snip.get("langSlug") in ("cpp", "c++"):
+                                starter_code = snip.get("code", "")
+                                break
+            except Exception as e_lc:
+                print(f"[_fetch_leetcode_meta error]: {e_lc}")
+        else:
+            # 1. Query CF Neon DB (10,025 problems with 71,003 testcases)
+            try:
+                cf_pool = get_cf_pool()
+                if cf_pool:
+                    async with cf_pool.acquire() as conn:
+                        cf_key = f"{contest_id}-{idx.upper()}" if contest_id and idx else key
+                        row_cf = await conn.fetchrow(
+                            """SELECT * FROM problems 
+                               WHERE LOWER(problem_key) = LOWER($1)
+                                  OR LOWER(problem_key) = LOWER($2)
+                                  OR (contest_id = $3 AND UPPER(problem_index) = UPPER($4))
+                               LIMIT 1""", key, cf_key, contest_id, idx
+                        )
+                        if row_cf:
+                            d_cf = dict(row_cf)
+                            if d_cf.get("title"):
+                                title = d_cf["title"]
+                            if d_cf.get("rating"):
+                                rating = int(d_cf["rating"])
+                            if d_cf.get("tags"):
+                                raw_tags = d_cf["tags"]
+                                if isinstance(raw_tags, str):
+                                    try:
+                                        raw_tags = json.loads(raw_tags)
+                                    except Exception:
+                                        pass
+                                if isinstance(raw_tags, list):
+                                    tags = [str(t).capitalize() for t in raw_tags]
+                            if d_cf.get("description"):
+                                description = _clean_html(d_cf["description"])
+                            if d_cf.get("input_format"):
+                                input_fmt = _clean_html(d_cf["input_format"])
+                            if d_cf.get("output_format"):
+                                output_fmt = _clean_html(d_cf["output_format"])
+                            if d_cf.get("note"):
+                                note_fmt = _clean_html(d_cf["note"])
+                            if d_cf.get("examples"):
+                                raw_ex = d_cf["examples"]
+                                if isinstance(raw_ex, str):
+                                    try:
+                                        raw_ex = json.loads(raw_ex)
+                                    except Exception:
+                                        pass
+                                if isinstance(raw_ex, list):
+                                    examples = raw_ex
+            except Exception as err_cf_db:
+                print(f"[CF Neon DB query error]: {err_cf_db}")
+
+            # 2. Codeforces API metadata & HTML direct fetch fallbacks
+            if contest_id and idx:
+                try:
+                    cf_meta = await _fetch_cf_problem_meta(contest_id, idx)
+                    if cf_meta:
+                        if not title or title == f"Problem {key}":
+                            title = cf_meta.get("name") or title
+                        if cf_meta.get("rating") and not rating:
+                            rating = int(cf_meta["rating"])
+                        if cf_meta.get("tags") and not tags:
+                            tags = [t.capitalize() for t in cf_meta["tags"]]
+                except Exception as e_cf:
+                    print(f"[_fetch_cf_problem_meta error]: {e_cf}")
+
+                if not description or not examples:
+                    try:
+                        cf_data = await _fetch_cf_html(contest_id, idx)
+                        if cf_data:
+                            if cf_data.get("title") and (not title or title == f"Problem {key}"):
+                                title = cf_data["title"]
+                            if cf_data.get("description") and not description:
+                                description = cf_data["description"]
+                            if cf_data.get("inputFormat") and not input_fmt:
+                                input_fmt = cf_data["inputFormat"]
+                            if cf_data.get("outputFormat") and not output_fmt:
+                                output_fmt = cf_data["outputFormat"]
+                            if cf_data.get("note") and not note_fmt:
+                                note_fmt = cf_data["note"]
+                            if cf_data.get("examples") and not examples:
+                                examples = cf_data["examples"]
+                    except Exception as e_html:
+                        print(f"[_fetch_cf_html error]: {e_html}")
+
+            # Try Hugging Face HARDTESTS dataset as last resort if description or examples still missing
+            if not description or not examples:
+                try:
+                    hf_row = await _fetch_hardtests_dataset(key, contest_id, idx)
+                    if hf_row:
+                        if hf_row.get("name") or hf_row.get("title"):
+                            title = hf_row.get("name") or hf_row.get("title")
+                        
+                        if hf_row.get("difficulty_ratings") and isinstance(hf_row.get("difficulty_ratings"), list):
+                            for d_entry in hf_row.get("difficulty_ratings"):
+                                if isinstance(d_entry, dict) and d_entry.get("score"):
+                                    try:
+                                        rating = int(d_entry["score"])
+                                        break
+                                    except Exception:
+                                        pass
+                        elif hf_row.get("rating"):
+                            try:
+                                rating = int(hf_row["rating"])
+                            except Exception:
+                                pass
+
+                        if hf_row.get("tags") and isinstance(hf_row.get("tags"), list):
+                            parsed_tags = [str(t).capitalize() for t in hf_row["tags"] if t]
+                            if parsed_tags:
+                                tags = parsed_tags
+
+                        raw_desc = hf_row.get("description") or hf_row.get("content") or hf_row.get("problem_description") or ""
+                        if raw_desc:
+                            description = _clean_html(raw_desc)
+                        input_fmt = _clean_html(hf_row.get("input_format") or hf_row.get("input_specification") or "")
+                        output_fmt = _clean_html(hf_row.get("output_format") or hf_row.get("output_specification") or "")
+                        note_fmt = _clean_html(hf_row.get("note") or "")
+                        
+                        tc_list = hf_row.get("public_test_cases") or hf_row.get("test_cases") or []
+                        if isinstance(tc_list, list) and tc_list:
+                            examples = []
+                            for tc in tc_list[:5]:
+                                if isinstance(tc, dict):
+                                    examples.append({
+                                        "input": str(tc.get("input") or "").strip(),
+                                        "output": str(tc.get("output") or "").strip()
+                                    })
+                except Exception as e_hf:
+                    print(f"[_fetch_hardtests_dataset error]: {e_hf}")
+
+        external_url = (
+            f"https://leetcode.com/problems/{key.lower().replace('lc-', '')}/"
+            if is_lc
+            else f"https://codeforces.com/problemset/problem/{contest_id}/{idx}"
+            if contest_id
+            else "https://codeforces.com/problemset"
+        )
+
+        if not description:
+            description = (
+                f"### {title}\n\n"
+                f"You are viewing problem **{key}** on **{plat_name.capitalize()}**.\n\n"
+                f"**Problem Identifier:** `{key}`  \n"
+                f"**Difficulty Rating:** {rating} ({difficulty.capitalize()})  \n"
+                f"**Tags:** {', '.join(tags)}\n\n"
+                f"Click the link below to open the complete statement on the official judge:\n\n"
+                f"👉 [{external_url}]({external_url})\n\n"
+                f"Write your solution in C++, Python, or Java and submit to verify your logic!"
+            )
+
+        if not examples:
+            examples = [{"input": "Sample Input Data", "output": "Sample Output Data"}]
+
+        statement = {
+            "key": key,
+            "contestId": contest_id,
+            "index": idx,
+            "title": title,
+            "rating": rating,
+            "tags": tags,
+            "timeLimitMs": 2000,
+            "memoryLimitMb": 256,
+            "description": description,
+            "inputFormat": input_fmt or "Standard Input containing test case parameters.",
+            "outputFormat": output_fmt or "Print the required answer to Standard Output.",
+            "note": note_fmt or "Ensure your algorithm complies with default time limits.",
+            "examples": examples,
+            "interactive": False,
+            "judgeable": True,
+            "testCount": max(len(examples), 5),
+            "platform": plat_name,
+            "starterCode": starter_code
+        }
+
+        return _json({"problem": statement})
+    except Exception as exc:
+        print(f"[problem_statement_api FATAL]: {exc}")
+        return _json({
+            "problem": {
+                "key": key,
+                "contestId": 0,
+                "index": key,
+                "title": f"Problem {key}",
+                "rating": 1200,
+                "tags": ["CP"],
+                "timeLimitMs": 2000,
+                "memoryLimitMb": 256,
+                "description": f"### Problem {key}\n\nProblem details loading...",
+                "inputFormat": "Standard Input",
+                "outputFormat": "Standard Output",
+                "note": "",
+                "examples": [{"input": "Sample Input", "output": "Sample Output"}],
+                "interactive": False,
+                "judgeable": True,
+                "testCount": 5,
+                "platform": "codeforces"
+            }
+        })
+
+
 def build_app() -> web.Application:
     app = web.Application(middlewares=[_cors])
     r = app.router
@@ -1766,6 +2471,7 @@ def build_app() -> web.Application:
     r.add_get("/api/modes", modes)
     r.add_get("/api/problems", daily_problems)
     r.add_get("/api/problems/{id}/solvers", problem_solvers)
+    r.add_get("/api/problems/{key}/statement", problem_statement_api)
     r.add_get("/api/leaderboard/points", leaderboard_points)
     r.add_get("/api/leaderboard/rating", leaderboard_rating)
     r.add_get("/api/users/{discord_id}", profile)
@@ -1785,6 +2491,10 @@ def build_app() -> web.Application:
     r.add_get("/api/discord/callback", discord_callback_api)
     r.add_get("/api/discord/me", discord_me_api)
     r.add_post("/api/discord/logout", discord_logout_api)
+    r.add_get("/api/leetcode/status", leetcode_status_api)
+    r.add_get("/api/cf/user/{handles}", cf_user_api)
+    r.add_get("/api/cf/status/{handle}", cf_status_api)
+    r.add_get("/api/cf/user/{handle}/rating-history", cf_rating_history_api)
     r.add_get("/api/announcements", announcements)
     r.add_get("/api/channels", channel_index)
     r.add_get("/api/channels/{key}/messages", channel_messages)
@@ -1793,6 +2503,21 @@ def build_app() -> web.Application:
     r.add_get("/api/editorials/{date}", editorial_for_date)
     r.add_get("/api/guild", guild_stats)
     r.add_get("/api/contests", upcoming_contests)
+
+    # ── /api/bot/* route aliases for legacy frontend compatibility ──
+    r.add_get("/api/bot/problems", daily_problems)
+    r.add_get("/api/bot/problems/{key}/statement", problem_statement_api)
+    r.add_get("/api/bot/contests", upcoming_contests)
+    r.add_get("/api/bot/channels", channel_index)
+    r.add_get("/api/bot/channels/{key}/messages", channel_messages)
+    r.add_get("/api/bot/channels/{key}/threads", channel_threads)
+    r.add_get("/api/bot/threads/{thread_id}/messages", thread_messages)
+    r.add_get("/api/bot/editorials/{date}", editorial_for_date)
+    r.add_post("/api/bot/duels/create", create_duel_api)
+    r.add_get("/api/bot/duels/state/{id}", get_duel_state_api)
+    r.add_post("/api/bot/duels/verify", verify_duel_submission_api)
+    r.add_post("/api/bot/duels/forfeit", forfeit_duel_api)
+
     r.add_get("/api/internal/hardtests/{pid}", get_hardtests)
     r.add_post("/api/problems/check", check_submissions)
     r.add_post("/api/internal/membership", internal_membership)
@@ -1804,6 +2529,14 @@ async def run_server(port: int, bot=None):
     """Drop-in replacement for keep_alive.run_server."""
     global _bot_instance
     _bot_instance = bot
+
+    try:
+        from database.connection import init_pool
+        await init_pool()
+        print("[api] DB pools (Supabase, CF Neon DB, LC Neon DB) initialized successfully.")
+    except Exception as e_db:
+        print(f"[api] DB pool initialization warning: {e_db}")
+
     runner = web.AppRunner(build_app())
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", port).start()

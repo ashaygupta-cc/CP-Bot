@@ -13,8 +13,10 @@ DISCORD_TOKEN   = os.getenv("DISCORD_TOKEN", "")
 PREFIX          = os.getenv("PREFIX", "!")
 ADMIN_ROLE      = os.getenv("ADMIN_ROLE", "Admin")
 
-# ── Database (Supabase PostgreSQL) ────────────────────────────────────────────
+# ── Database (Supabase & Neon PostgreSQL) ──────────────────────────────────────
 DATABASE_URL    = os.getenv("DATABASE_URL", "")
+DATABASE_URL_CF = os.getenv("DATABASE_URL_CF", os.getenv("DATABASE_URL", ""))
+DATABASE_URL_LC = os.getenv("DATABASE_URL_LC", "")
 
 # ── Render keep-alive ─────────────────────────────────────────────────────────
 RENDER_URL      = os.getenv("RENDER_URL", "")
