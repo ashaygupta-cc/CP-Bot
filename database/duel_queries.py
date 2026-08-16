@@ -60,6 +60,19 @@ async def set_duel_config(conn, guild_id: str, key: str, value: str, updated_by:
     )
 
 
+async def ensure_user_exists(conn, discord_id: str):
+    if not discord_id:
+        return
+    await conn.execute(
+        """
+        INSERT INTO users (discord_id, created_at)
+        VALUES ($1, NOW())
+        ON CONFLICT (discord_id) DO NOTHING
+        """,
+        str(discord_id),
+    )
+
+
 # ── Ratings ──────────────────────────────────────────────────────────────
 
 async def get_or_create_rating(conn, discord_id: str, guild_id: str, mode: str, default: int = 800) -> dict:

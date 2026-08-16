@@ -415,17 +415,22 @@ async def create_duel_api(request: web.Request) -> web.Response:
 
             problem_rows = []
             for i, prob in enumerate(probs, 1):
+                prob_platform = prob.get("platform") or platform
                 pid = await duel_queries.add_duel_problem(
-                    conn, duel_id, i, prob["platform"], prob["problem_id"],
+                    conn, duel_id, i, prob_platform, prob["problem_id"],
                     prob["title"], prob.get("difficulty", "Medium"),
                     prob.get("rating"), prob.get("url", ""), deadlines[i-1]
                 )
                 problem_rows.append({
-                    "id": pid, "game_number": i, "platform": prob["platform"],
+                    "id": pid, "game_number": i, "platform": prob_platform,
                     "problem_id": prob["problem_id"], "title": prob["title"],
                     "difficulty_label": prob.get("difficulty", "Medium"),
                     "rating": prob.get("rating"), "url": prob.get("url", "")
                 })
+
+        if _bot_instance:
+            import asyncio
+            asyncio.create_task(_broadcast_discord_duel_start(duel_id, p1_id, p2_id if not is_bot else None, mode, problem_rows))
 
         return _json({
             "duel_id": duel_id,
@@ -543,6 +548,60 @@ async def verify_duel_submission_api(request: web.Request) -> web.Response:
         return _json({"error": str(e)}, status=500)
 
 
+async def _broadcast_discord_duel_start(duel_id: int, p1_id: str, p2_id: str | None, mode: str, problems: list[dict]):
+    if not _bot_instance:
+        return
+    try:
+        import discord
+        mode_channel = mode.replace("_", "-")
+        channel_names = [mode_channel, mode, "duels-blitz", "cp-dsa", "general"]
+        target_channel = None
+
+        for guild in _bot_instance.guilds:
+            for ch in guild.text_channels:
+                if ch.name.lower() in channel_names:
+                    target_channel = ch
+                    break
+            if target_channel:
+                break
+
+        if not target_channel:
+            for guild in _bot_instance.guilds:
+                if guild.text_channels:
+                    target_channel = guild.text_channels[0]
+                    break
+
+        if not target_channel:
+            return
+
+        async with get_pool().acquire() as conn:
+            await conn.execute("UPDATE duels SET channel_id = $1 WHERE id = $2", str(target_channel.id), duel_id)
+
+        mode_title = mode.replace("_", " ").upper()
+        prob_lines = []
+        for p in problems:
+            g_num = p.get("game_number", 1)
+            title = p.get("title", "Problem")
+            url = p.get("url", "")
+            diff = p.get("difficulty_label", "Medium")
+            prob_lines.append(f"• **Game {g_num}**: [{title}]({url}) `[{diff}]`")
+
+        em = discord.Embed(
+            title=f"⚔️ NEW {mode_title} MATCH STARTED!",
+            description=(
+                f"**Match #{duel_id}** is now live!\n\n"
+                f"👤 **Player 1**: `{p1_id}`\n"
+                f"⚔️ **Player 2**: `{p2_id or 'CP-Bot AI 🤖'}`\n\n"
+                f"🎯 **Problems**:\n" + "\n".join(prob_lines) + "\n\n"
+                f"🎮 *Playing & broadcasting live on Binary Beats Web Arena!*"
+            ),
+            color=0xFEE75C,
+        )
+        await target_channel.send(embed=em)
+    except Exception as e:
+        print(f"[api/broadcast] Match start broadcast error: {e}")
+
+
 async def _broadcast_discord_duel_update(duel_id: int, solver_id: str, prob_title: str, finished: bool, winner_id: str | None):
     if not _bot_instance:
         return
@@ -550,29 +609,52 @@ async def _broadcast_discord_duel_update(duel_id: int, solver_id: str, prob_titl
         pool = get_pool()
         async with pool.acquire() as conn:
             duel = await duel_queries.get_duel(conn, duel_id)
-        if not duel or not duel.get("channel_id"):
+        if not duel:
             return
-        ch = _bot_instance.get_channel(int(duel["channel_id"]))
-        if not ch:
+
+        target_channel = None
+        if duel.get("channel_id"):
+            target_channel = _bot_instance.get_channel(int(duel["channel_id"]))
+
+        if not target_channel:
+            mode = duel.get("mode", "dsa_blitz")
+            mode_channel = mode.replace("_", "-")
+            channel_names = [mode_channel, mode, "duels-blitz", "cp-dsa"]
+            for guild in _bot_instance.guilds:
+                for ch in guild.text_channels:
+                    if ch.name.lower() in channel_names:
+                        target_channel = ch
+                        break
+                if target_channel:
+                    break
+
+        if not target_channel:
             return
 
         import discord
+        p1 = duel["player1_id"]
+        p2 = duel["player2_id"] or "CP-Bot AI 🤖"
+        p1_won = duel["p1_games_won"]
+        p2_won = duel["p2_games_won"]
+
+        score_line = f"📊 **Scoreboard**: `{p1}` ({p1_won}) — ({p2_won}) `{p2}`"
+
         if finished:
-            win_txt = f"🏆 **Match Winner**: <@{winner_id}>!" if winner_id else "🤝 **Match Draw!**"
+            win_txt = f"🏆 **Match Winner**: `{winner_id}`!" if winner_id else "🤝 **Match Draw!**"
             em = discord.Embed(
-                title=f"⚡ {prob_title} Solved!",
-                description=f"<@{solver_id}> solved the problem!\n\n{win_txt}",
-                color=0x57F287
+                title=f"⚡ {prob_title} Solved! — Match Complete",
+                description=f"👤 `{solver_id}` solved the problem!\n\n{score_line}\n\n{win_txt}",
+                color=0x57F287,
             )
         else:
             em = discord.Embed(
                 title=f"⚡ {prob_title} Solved!",
-                description=f"<@{solver_id}> solved the problem and took the round!",
-                color=0x00D9FF
+                description=f"👤 `{solver_id}` solved the problem and took the round!\n\n{score_line}",
+                color=0x00D9FF,
             )
-        await ch.send(embed=em)
+        await target_channel.send(embed=em)
     except Exception as e:
-        print(f"[api/broadcast] Discord broadcast failed: {e}")
+        print(f"[api/broadcast] Discord broadcast update failed: {e}")
 
 
 async def stats(request: web.Request) -> web.Response:
