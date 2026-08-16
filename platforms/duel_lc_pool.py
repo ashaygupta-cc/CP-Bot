@@ -136,18 +136,66 @@ async def _gql_post(query: str, variables: dict) -> dict:
             timeout=aiohttp.ClientTimeout(total=15),
         ) as r:
             if r.status != 200:
+                # Log the response body — a GraphQL 400 includes the exact
+                # schema error ("Unknown argument…", "exceeds maximum…"),
+                # which is the only way to debug this from Render logs.
+                body = ""
+                try:
+                    body = (await r.text())[:300]
+                except Exception:
+                    pass
+                print(f"[LC_POOL] GQL HTTP {r.status} — body: {body}", flush=True)
                 raise RuntimeError(f"LeetCode HTTP {r.status}")
-            return await r.json()
+            data = await r.json(content_type=None)
+            # GraphQL can return 200 with an "errors" array — surface it.
+            if isinstance(data, dict) and data.get("errors"):
+                msg = str(data["errors"])[:300]
+                print(f"[LC_POOL] GQL 200-with-errors: {msg}", flush=True)
+                raise RuntimeError(f"LeetCode GraphQL error: {msg}")
+            return data
+
+
+def _parse_v2_questions(data: dict) -> list[dict]:
+    payload = (data.get("data") or {}).get("problemsetQuestionListV2") or {}
+    return payload.get("questions") or []
 
 
 async def _fetch_gql_v2_all() -> list[dict]:
     """Tier 2: current problemsetQuestionListV2 schema, unfiltered so we get
-    every difficulty back in one shot."""
+    every difficulty back.
+
+    LeetCode's server caps `limit` (their own site pages at 100); a huge
+    limit like 3500 is one plausible source of HTTP 400. Strategy:
+      a) try one big page (limit 1000 — often accepted),
+      b) if that errors, paginate with limit=100 across the list, sampling
+         pages from the front, middle, and deep end so all three
+         difficulties are represented (hards live deeper in the list).
+    """
+    questions: list[dict] = []
+    # LeetCode's V2 schema REQUIRES filterCombineType inside filters —
+    # an empty {} is rejected with HTTP 400 (verified from live logs).
+    v2_filters = {"filterCombineType": "ALL"}
     await _sleep_jitter()
-    variables = {"categorySlug": "", "limit": 3500, "skip": 0, "filters": {}}
-    data = await _gql_post(QUESTION_LIST_V2_QUERY, variables)
-    payload = data.get("data", {}).get("problemsetQuestionListV2") or {}
-    questions = payload.get("questions") or []
+    try:
+        data = await _gql_post(QUESTION_LIST_V2_QUERY,
+                               {"categorySlug": "", "limit": 1000, "skip": 0, "filters": v2_filters})
+        questions = _parse_v2_questions(data)
+    except Exception as e:
+        print(f"[LC_POOL] V2 single-page fetch failed ({e}); trying paginated fallback…", flush=True)
+        # Sample pages across the problemset: fronts are easy/medium-heavy,
+        # deeper skips pick up mediums/hards. ~8 quick requests, cached 6h.
+        for skip in (0, 100, 400, 800, 1200, 1800, 2400, 3000):
+            try:
+                await asyncio.sleep(random.uniform(0.4, 1.0))
+                data = await _gql_post(QUESTION_LIST_V2_QUERY,
+                                       {"categorySlug": "", "limit": 100, "skip": skip, "filters": v2_filters})
+                page = _parse_v2_questions(data)
+                if not page:
+                    break  # ran past the end of the list
+                questions.extend(page)
+            except Exception as page_err:
+                print(f"[LC_POOL] V2 page skip={skip} failed: {page_err}", flush=True)
+                break
     if not questions:
         raise RuntimeError("LeetCode GraphQL V2 returned no questions.")
 
@@ -179,7 +227,7 @@ async def _fetch_gql_legacy_all() -> list[dict]:
             "categorySlug": "",
             "limit": 400,
             "skip": 0,
-            "filters": {"difficulty": difficulty},
+            "filters": {"difficulty": difficulty.upper()},  # DifficultyEnum: EASY/MEDIUM/HARD (verified from live 400 body)
         }
         data = await _gql_post(LEGACY_QUESTION_LIST_QUERY, variables)
         questions = (
@@ -225,10 +273,15 @@ async def _load_all_problems() -> list[dict]:
             return _all_cache["problems"]
 
         problems: list[dict] | None = None
+        # Order (verified from live Render logs): the GraphQL endpoint is
+        # reachable from Render (submission checks use it all day), while
+        # REST /api/problems/all/ gets a Cloudflare HTML page there. So
+        # GraphQL goes first for fast success; REST is kept as a last
+        # resort for environments where it does work.
         for tier_name, fetch_fn in (
-            ("REST /api/problems/all/", _fetch_rest_all),
             ("GraphQL problemsetQuestionListV2", _fetch_gql_v2_all),
             ("GraphQL questionList (legacy)", _fetch_gql_legacy_all),
+            ("REST /api/problems/all/", _fetch_rest_all),
         ):
             try:
                 problems = await _fetch_with_retries(fetch_fn)

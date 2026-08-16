@@ -63,6 +63,31 @@ COLOR_WARN    = getattr(config, "COLOR_WARN", 0xFEE75C)
 COLOR_CYAN    = getattr(config, "COLOR_CYAN", 0x00D9FF)
 ADMIN_ROLE    = getattr(config, "ADMIN_ROLE", "Admin")
 
+# ── Branding (matches logo: dark navy + cyan) ────────────────────────────
+BOT_LOGO   = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats.webp"
+BOT_BANNER = "https://raw.githubusercontent.com/ashaygupta-cc/ashaygupta-cc/main/Binary%20Beats%20Banner.jpeg"
+BRAND      = "Binary Beats"
+WEBHOOK_NAME = "Z4s"
+
+# Semantic palette — use these instead of raw hex in embeds
+CLR_MATCH   = 0x00D9FF   # cyan — active, challenges, info
+CLR_WIN     = 0x57F287   # green — accepted, success
+CLR_LOSS    = 0xED4245   # red — errors, forfeit, declined
+CLR_RESULT  = 0xFEE75C   # gold — match results / trophy
+CLR_NEUTRAL = 0x2F3136   # dark — expired, neutral
+
+
+def _brand(title: str, desc: str = None, color: int = CLR_MATCH,
+           *, thumb: bool = True, banner: bool = False) -> discord.Embed:
+    """Create a consistently-branded embed."""
+    em = discord.Embed(title=title, description=desc, color=color)
+    em.set_author(name=BRAND, icon_url=BOT_LOGO)
+    if thumb:
+        em.set_thumbnail(url=BOT_LOGO)
+    if banner:
+        em.set_image(url=BOT_BANNER)
+    return em
+
 IST = timezone(timedelta(hours=5, minutes=30))
 
 MODES = {
@@ -81,6 +106,18 @@ MODE_STATS_CHANNELS = {
     "dsa_duel":   ["dsa-duels", "dsa-blitz"],
     "icpc_blitz": ["icpc-blitz", "icpc-duels"],
     "icpc_duel":  ["icpc-duels", "icpc-blitz"],
+}
+
+# Per-mode headline used in the match embed. "ICPC-style" wording appears
+# ONLY in the two ICPC modes — CF and LC matches describe themselves
+# accurately instead of borrowing ICPC branding.
+MODE_BLURB = {
+    "cp_duel":    "Codeforces marathon",
+    "dsa_duel":   "LeetCode marathon",
+    "icpc_duel":  "ICPC-style contest",
+    "cp_blitz":   "Codeforces speed race",
+    "dsa_blitz":  "LeetCode speed race",
+    "icpc_blitz": "ICPC-style speed race",
 }
 
 FORFEIT_PENALTY = 32
@@ -103,6 +140,11 @@ def _blitz_secs_for(idx: int, total: int) -> int:
 CHECK_COOLDOWN_SEC = 20
 _last_check: dict[tuple, float] = {}
 _duel_locks: dict[str, asyncio.Lock] = {}
+# Per-duel lock so a blitz problem can never be resolved twice concurrently
+# (e.g. both players clicking Check in the same second, or a Check racing
+# the auto_check expiry sweep). Lock is always taken BEFORE acquiring a DB
+# connection, in every caller, so lock→conn ordering is consistent.
+_resolve_locks: dict[int, asyncio.Lock] = {}
 
 
 def is_admin():
@@ -186,7 +228,7 @@ class ChallengeView(discord.ui.View):
         self.responded = False
         self.message: discord.Message | None = None
 
-    @discord.ui.button(label="Accept", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.opponent.id:
             await interaction.response.send_message("Only the challenged player can respond.", ephemeral=True)
@@ -195,7 +237,7 @@ class ChallengeView(discord.ui.View):
         self.stop()
         for c in self.children:
             c.disabled = True
-        await interaction.response.edit_message(content="✅ Accepted. Setting up match…", view=self)
+        await interaction.response.edit_message(content="✅ **Accepted** — setting up the arena…", view=self)
         await self.cog.begin_human_match(self.ctx, self.challenger, self.opponent, self.mode, self.format_num)
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.secondary)
@@ -207,7 +249,7 @@ class ChallengeView(discord.ui.View):
         self.stop()
         for c in self.children:
             c.disabled = True
-        await interaction.response.edit_message(content="❌ Challenge declined.", view=self)
+        await interaction.response.edit_message(content="Challenge declined.", view=self)
         await self.cog.offer_bot_fallback(interaction.channel, self.challenger, self.mode)
 
     async def on_timeout(self):
@@ -217,7 +259,7 @@ class ChallengeView(discord.ui.View):
             c.disabled = True
         try:
             if self.message:
-                await self.message.edit(content="Challenge expired — no response received.", view=self)
+                await self.message.edit(content="Challenge expired — no response.", view=self)
         except Exception:
             pass
         channel = self.message.channel if self.message else self.ctx.channel
@@ -230,7 +272,7 @@ class SubmissionCheckerView(discord.ui.View):
         self.cog = cog
         self.duel_id = duel_id
 
-    @discord.ui.button(label="✅ Check Submissions", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Check Submissions", style=discord.ButtonStyle.primary)
     async def check(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[CHECK] {interaction.user.name} → duel {self.duel_id}", flush=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -238,7 +280,7 @@ class SubmissionCheckerView(discord.ui.View):
             key = (self.duel_id, interaction.user.id)
             if time.monotonic() - _last_check.get(key, 0) < CHECK_COOLDOWN_SEC:
                 await interaction.followup.send(
-                    f"⏱️ Checked recently — try again in {CHECK_COOLDOWN_SEC}s.", ephemeral=True)
+                    f"Checked recently — try again in {CHECK_COOLDOWN_SEC}s.", ephemeral=True)
                 return
             _last_check[key] = time.monotonic()
 
@@ -246,7 +288,7 @@ class SubmissionCheckerView(discord.ui.View):
             async with pool.acquire() as conn:
                 duel = await dq.get_duel(conn, self.duel_id)
             if not duel or duel["status"] != "active":
-                await interaction.followup.send("❌ This duel isn't active anymore.", ephemeral=True)
+                await interaction.followup.send("This duel is no longer active.", ephemeral=True)
                 return
             duel = dict(duel)
 
@@ -258,7 +300,7 @@ class SubmissionCheckerView(discord.ui.View):
             print(f"[CHECK] ❌ {type(e).__name__}: {e}", flush=True)
             import traceback; traceback.print_exc()
             try:
-                await interaction.followup.send(f"❌ Check failed: {e}", ephemeral=True)
+                await interaction.followup.send(f"Check failed: {e}", ephemeral=True)
             except Exception:
                 pass
 
@@ -269,7 +311,7 @@ class ForfeitView(discord.ui.View):
         self.cog = cog
         self.duel_id = duel_id
 
-    @discord.ui.button(label="🏳️ Forfeit Match", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Forfeit Match", style=discord.ButtonStyle.secondary)
     async def forfeit(self, interaction: discord.Interaction, button: discord.ui.Button):
         print(f"[FORFEIT] {interaction.user.name} → duel {self.duel_id}", flush=True)
         await interaction.response.defer(ephemeral=True)
@@ -279,7 +321,61 @@ class ForfeitView(discord.ui.View):
             print(f"[FORFEIT] ❌ {type(e).__name__}: {e}", flush=True)
             import traceback; traceback.print_exc()
             try:
-                await interaction.followup.send(f"❌ Forfeit failed: {e}", ephemeral=True)
+                await interaction.followup.send(f"Forfeit failed: {e}", ephemeral=True)
+            except Exception:
+                pass
+
+
+class MatchControlView(discord.ui.View):
+    """Combined Check + Forfeit — single row, clean layout."""
+    def __init__(self, cog, duel_id: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.duel_id = duel_id
+
+    @discord.ui.button(label="Check Submissions", style=discord.ButtonStyle.primary)
+    async def check(self, interaction: discord.Interaction, button: discord.ui.Button):
+        print(f"[CHECK] {interaction.user.name} → duel {self.duel_id}", flush=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            key = (self.duel_id, interaction.user.id)
+            if time.monotonic() - _last_check.get(key, 0) < CHECK_COOLDOWN_SEC:
+                await interaction.followup.send(
+                    f"Checked recently — try again in {CHECK_COOLDOWN_SEC}s.", ephemeral=True)
+                return
+            _last_check[key] = time.monotonic()
+
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                duel = await dq.get_duel(conn, self.duel_id)
+            if not duel or duel["status"] != "active":
+                await interaction.followup.send("This duel is no longer active.", ephemeral=True)
+                return
+            duel = dict(duel)
+
+            if _is_duel_mode(duel["mode"]):
+                await self.cog.duel_check(interaction, duel)
+            else:
+                await self.cog.blitz_check(interaction, duel)
+        except Exception as e:
+            print(f"[CHECK] ❌ {type(e).__name__}: {e}", flush=True)
+            import traceback; traceback.print_exc()
+            try:
+                await interaction.followup.send(f"Check failed: {e}", ephemeral=True)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Forfeit Match", style=discord.ButtonStyle.secondary)
+    async def forfeit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        print(f"[FORFEIT] {interaction.user.name} → duel {self.duel_id}", flush=True)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await self.cog.handle_forfeit(interaction, self.duel_id)
+        except Exception as e:
+            print(f"[FORFEIT] ❌ {type(e).__name__}: {e}", flush=True)
+            import traceback; traceback.print_exc()
+            try:
+                await interaction.followup.send(f"Forfeit failed: {e}", ephemeral=True)
             except Exception:
                 pass
 
@@ -289,7 +385,7 @@ class BotFallbackView(discord.ui.View):
         super().__init__(timeout=timeout_s)
         self.cog, self.challenger, self.mode = cog, challenger, mode
 
-    @discord.ui.button(label="🤖 Play vs Bot", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Play vs Bot", style=discord.ButtonStyle.primary)
     async def play_bot(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.challenger.id:
             await interaction.response.send_message("Only the challenger can use this.", ephemeral=True)
@@ -311,12 +407,124 @@ class Duels(commands.Cog):
         self.bot = bot
         self._bot_solve_tasks: dict[int, asyncio.Task] = {}
         self._finalizing: set[int] = set()
+        # Duels whose _finish_match has already begun — a match must never
+        # be "finished" twice (double stats post, double rating apply).
+        self._finished: set[int] = set()
+        self._webhook_cache: dict[int, discord.Webhook] = {}
+        self._live_cards: dict[int, discord.Message] = {}   # duel_id → jump-link msg
         self.auto_check.start()
 
     def cog_unload(self):
         self.auto_check.cancel()
         for t in self._bot_solve_tasks.values():
             t.cancel()
+
+    # ── Webhook helpers ────────────────────────────────────────────────────
+
+    async def _get_webhook(self, channel) -> discord.Webhook | None:
+        """Get or create a branded webhook for the channel."""
+        if channel.id in self._webhook_cache:
+            return self._webhook_cache[channel.id]
+        try:
+            webhooks = await channel.webhooks()
+            for wh in webhooks:
+                if wh.name == WEBHOOK_NAME:
+                    self._webhook_cache[channel.id] = wh
+                    return wh
+            wh = await channel.create_webhook(name=WEBHOOK_NAME)
+            self._webhook_cache[channel.id] = wh
+            return wh
+        except Exception as e:
+            print(f"[WEBHOOK] Failed to get/create: {e}", flush=True)
+            return None
+
+    async def _send_branded(self, channel, embed=None, content=None, **kwargs):
+        """Send via webhook for premium branding (custom name + avatar)."""
+        wh = await self._get_webhook(channel)
+        if wh:
+            try:
+                return await wh.send(
+                    content=content, embed=embed,
+                    username=WEBHOOK_NAME, avatar_url=BOT_LOGO,
+                    wait=True, **kwargs)
+            except Exception as e:
+                print(f"[WEBHOOK] Send failed, fallback: {e}", flush=True)
+        return await channel.send(content=content, embed=embed, **kwargs)
+
+    # ── ASCII art countdown digits ──────────────────────────────────────
+    _CD_ART = {
+        7: "███████\n"
+           "     ██\n"
+           "    ██\n"
+           "   ██\n"
+           "  ██",
+        6: " █████\n"
+           "██\n"
+           "██████\n"
+           "██  ██\n"
+           " █████",
+        5: "██████\n"
+           "██\n"
+           "█████\n"
+           "    ██\n"
+           "█████",
+        4: "██  ██\n"
+           "██  ██\n"
+           "██████\n"
+           "    ██\n"
+           "    ██",
+        3: "█████\n"
+           "   ██\n"
+           " ████\n"
+           "   ██\n"
+           "█████",
+        2: " █████\n"
+           "    ██\n"
+           " ████\n"
+           "██\n"
+           "██████",
+        1: "  ██\n"
+           " ███\n"
+           "  ██\n"
+           "  ██\n"
+           "██████",
+    }
+    _CD_GO = " ████  ████  ██\n" \
+             "██    ██  ██ ██\n" \
+             "██ ██ ██  ██ ██\n" \
+             "██  █ ██  ██\n" \
+             " ████  ████  ██"
+
+    def _cd_frame(self, n: int) -> str:
+        art = self._CD_ART.get(n, "") if n > 0 else self._CD_GO
+        lines = art.split("\n")
+        w = max(len(l) for l in lines)
+        pad = max(w + 6, 18)
+        centered = "\n".join(l.center(pad) for l in lines)
+        return f"```ansi\n\u001b[1;36m{centered}\u001b[0m\n```"
+
+    async def _run_countdown(self, channel, seconds: int = 7):
+        """Animated ASCII art countdown above the match card."""
+        try:
+            msg = await channel.send(self._cd_frame(seconds))
+            return msg
+        except Exception:
+            return None
+
+    async def _animate_countdown(self, msg, seconds: int = 7):
+        """Edit the countdown message 6→1→GO! then delete."""
+        if not msg:
+            return
+        try:
+            for i in range(seconds - 1, 0, -1):
+                await asyncio.sleep(1)
+                await msg.edit(content=self._cd_frame(i))
+            await asyncio.sleep(1)
+            await msg.edit(content=self._cd_frame(0))
+            await asyncio.sleep(2)
+            await msg.delete()
+        except Exception:
+            pass
 
     # ── Commands ───────────────────────────────────────────────────────────
 
@@ -330,6 +538,11 @@ class Duels(commands.Cog):
         !duel bot cp_duel 2 1600          Bot, 2 problems, rating 1600
         """
         print(f"[DUEL_CMD] opponent={opponent_str} mode={mode} a3={format_or_rating} a4={rating_str}", flush=True)
+        # Delete the command message for a clean channel
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
         mode = mode.lower()
         if mode not in MODES:
             await ctx.send(f"Unknown mode. Available: {', '.join(MODES.keys())}")
@@ -376,20 +589,41 @@ class Duels(commands.Cog):
                 return
 
             challenge_timeout = int(cfg.get("challenge_timeout", 90))
-            em = discord.Embed(title="⚔️ Duel Challenge Incoming", color=COLOR_CYAN)
-            em.add_field(name="🎯 Match Details",
-                         value=f"{MODES[mode]['label']} • {format_num}-Problem Format", inline=False)
-            em.add_field(name="👤 Challenger", value=ctx.author.mention, inline=True)
-            em.add_field(name="🛡️ Opponent", value=opponent.mention, inline=True)
+
+            # ── Fetch ratings for display ──
+            p1r = await self._get_or_create_duel_rating(ctx.author, ctx.guild, mode)
+            p2r = await self._get_or_create_duel_rating(opponent, ctx.guild, mode)
+            p1_rank = duel_ranks.get_rank(p1r["rating"])
+            p2_rank = duel_ranks.get_rank(p2r["rating"])
+
+            em = _brand("__Duel Challenge__", color=CLR_MATCH, banner=True)
+
             if _is_duel_mode(mode):
                 total_min = format_num * DUEL_SECS_PER_PROBLEM // 60
-                fmt = (f"ICPC-style contest • **{total_min} min total**\n"
-                       f"Solve in order — next problem unlocks when you finish the current one")
+                fmt_desc = (
+                    f"{MODE_BLURB[mode]} · **{total_min} min** total\n"
+                    f"Solve in order — next problem unlocks\n"
+                    f"when you finish the current one.")
             else:
-                fmt = ("Fast fingers • one problem at a time\n"
-                       "First verified solve takes each problem")
-            em.add_field(name="📋 Format", value=fmt, inline=False)
-            em.set_footer(text=f"Only {opponent.name} can accept/decline • Expires in {challenge_timeout}s")
+                fmt_desc = (
+                    f"{MODE_BLURB[mode]} · one problem at a time\n"
+                    f"First verified solve takes each problem.")
+
+            em.description = (
+                f"**{MODES[mode]['label']}** · **{format_num}**-Problem Format\n\n"
+                f"{fmt_desc}")
+
+            em.add_field(
+                name="__Challenger__",
+                value=f"{ctx.author.mention}\n**{p1_rank['name']}** · `{p1r['rating']}`",
+                inline=True)
+            em.add_field(
+                name="__Opponent__",
+                value=f"{opponent.mention}\n**{p2_rank['name']}** · `{p2r['rating']}`",
+                inline=True)
+            em.set_footer(
+                text=f"Only {opponent.name} can accept/decline · Expires in {challenge_timeout}s",
+                icon_url=BOT_LOGO)
 
             view = ChallengeView(self, ctx, ctx.author, opponent, mode, challenge_timeout, format_num)
             view.message = await ctx.send(embed=em, view=view)
@@ -403,19 +637,20 @@ class Duels(commands.Cog):
         if not profile:
             await ctx.send(f"{target.name} hasn't participated in any duels yet.")
             return
-        em = discord.Embed(title=f"Duel Profile: {target.name}",
-                           description="Ratings and statistics across all modes",
-                           color=COLOR_CYAN, timestamp=datetime.now(timezone.utc))
+        em = _brand(f"__{target.name}__", color=CLR_MATCH, thumb=False)
+        em.description = "Ratings and records across all modes\n"
+        em.timestamp = datetime.now(timezone.utc)
         for row in profile:
             rating = row["rating"]
             rank_info = duel_ranks.get_rank(rating)
             w, l, d = row["wins"], row["losses"], row["draws"]
-            record = f"{w}W {l}L {d}D" if (w + l + d) > 0 else "No matches"
-            field_value = f"**{rank_info['name']} — {rating} points**\n{record}"
+            record = f"`{w}W` `{l}L` `{d}D`" if (w + l + d) > 0 else "No matches"
+            field_value = f"**{rank_info['name']}** · `{rating}`\n{record}"
             if row["streak"] != 0:
                 streak_type = "Win" if row["streak"] > 0 else "Loss"
-                field_value += f"\nStreak: {streak_type} ×{abs(row['streak'])}"
-            em.add_field(name=MODES[row["mode"]]["label"], value=field_value, inline=True)
+                field_value += f"\n{streak_type} streak ×{abs(row['streak'])}"
+            em.add_field(name=f"__{MODES[row['mode']]['label']}__", value=field_value, inline=True)
+        em.set_footer(text=BRAND, icon_url=BOT_LOGO)
         await ctx.send(embed=em)
 
     @commands.command(name="duelrank", help="Check your rank/tier in a mode.")
@@ -431,14 +666,16 @@ class Duels(commands.Cog):
         pool = get_pool()
         async with pool.acquire() as conn:
             profile = await dq.get_profile(conn, str(ctx.author.id), str(ctx.guild.id))
-        em = discord.Embed(title=f"{ctx.author.name}'s Duel Ranks",
-                           color=COLOR_CYAN, timestamp=datetime.now(timezone.utc))
+        em = _brand(f"__{ctx.author.name}__", color=CLR_MATCH, thumb=False)
+        em.description = "Current ranks"
+        em.timestamp = datetime.now(timezone.utc)
         for row in profile:
             if row["mode"] not in modes_to_check:
                 continue
             rank_info = duel_ranks.get_rank(row["rating"])
-            em.add_field(name=MODES[row["mode"]]["label"],
-                         value=f"**{rank_info['name']}** ({row['rating']} rating)", inline=True)
+            em.add_field(name=f"__{MODES[row['mode']]['label']}__",
+                         value=f"**{rank_info['name']}** · `{row['rating']}`", inline=True)
+        em.set_footer(text=BRAND, icon_url=BOT_LOGO)
         await ctx.send(embed=em)
 
     @commands.command(name="duelleaderboard", help="Top duel players in a mode.")
@@ -450,20 +687,37 @@ class Duels(commands.Cog):
         pool = get_pool()
         async with pool.acquire() as conn:
             rows = await dq.get_leaderboard(conn, str(ctx.guild.id), mode, limit=10)
-        em = discord.Embed(title=f"Duel Leaderboard: {MODES[mode]['label']}",
-                           color=COLOR_CYAN, timestamp=datetime.now(timezone.utc))
+        em = _brand(f"__Leaderboard — {MODES[mode]['label']}__", color=CLR_MATCH, thumb=False)
+        em.timestamp = datetime.now(timezone.utc)
         if not rows:
             em.description = "No players yet."
             await ctx.send(embed=em)
             return
+        lines = []
         for i, row in enumerate(rows, 1):
             user = self.bot.get_user(int(row["discord_id"])) if row["discord_id"].isdigit() else None
             name = user.display_name if user else f"User {row['discord_id']}"
             rank_info = duel_ranks.get_rank(row["rating"])
-            record = f"{row['wins']}W {row['losses']}L {row['draws']}D"
-            em.add_field(name=f"#{i} {name}",
-                         value=f"**{rank_info['name']}** ({row['rating']})\n{record}", inline=False)
+            record = f"`{row['wins']}W` `{row['losses']}L` `{row['draws']}D`"
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"`{i}.`")
+            lines.append(f"{medal} **{name}** — {rank_info['name']} · `{row['rating']}`\n  {record}")
+        em.description = "\n\n".join(lines)
+        em.set_footer(text=BRAND, icon_url=BOT_LOGO)
         await ctx.send(embed=em)
+
+    # ── Bot fallback ─────────────────────────────────────────────────────
+
+    async def offer_bot_fallback(self, channel, challenger, mode: str):
+        """Offer the challenger a bot match when the human opponent declined/timed out."""
+        em = _brand(
+            "__No opponent?__",
+            desc=f"Challenge a bot instead — same mode, same rating system.",
+            color=CLR_NEUTRAL, thumb=False)
+        em.set_footer(text="Bot matches still affect your rating.", icon_url=BOT_LOGO)
+        try:
+            await channel.send(embed=em, view=BotFallbackView(self, challenger, mode))
+        except Exception:
+            pass
 
     # ── Match setup ────────────────────────────────────────────────────────
 
@@ -494,6 +748,27 @@ class Duels(commands.Cog):
         pool = get_pool()
         async with pool.acquire() as conn:
             return await dq.get_or_create_rating(conn, str(user.id), str(guild.id), mode)
+
+    async def _void_failed_setup(self, duel_id: int, channel):
+        """
+        Setup crashed after the duel row was created (problem fetch failed,
+        channel creation failed, etc). Void the row so the players aren't
+        blocked by the one-match-at-a-time check, and remove the orphan
+        room where no match ever started. No ratings are touched.
+        """
+        try:
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                await dq.finish_duel(conn, duel_id, None)
+            print(f"[MATCH] 🧹 voided failed-setup duel {duel_id}", flush=True)
+        except Exception as e:
+            print(f"[MATCH] ⚠️ could not void duel {duel_id}: {e}", flush=True)
+        if channel is not None:
+            try:
+                await channel.delete(reason="Duel setup failed — cleaning up")
+                print(f"[MATCH] 🧹 deleted orphan channel {channel.name}", flush=True)
+            except Exception as e:
+                print(f"[MATCH] ⚠️ could not delete orphan channel: {e}", flush=True)
 
     async def begin_human_match(self, ctx, challenger, opponent, mode: str, format_num: int = 3):
         try:
@@ -529,13 +804,33 @@ class Duels(commands.Cog):
                         is_bot_match=False, bot_rating=None,
                         total_games=format_num, duel_number=duel_num)
 
-            channel = await self._create_duel_channel(ctx, challenger, opponent, mode, duel_num)
+            channel = None
+            try:
+                channel = await self._create_duel_channel(ctx, challenger, opponent, mode, duel_num)
 
-            async with pool.acquire() as conn:
-                await dq.activate_duel(conn, duel_id, str(channel.id))
-                await self._setup_problems(conn, duel_id, mode,
-                                           p1_rating["rating"], p2_rating["rating"],
-                                           cfg, format_num=format_num)
+                async with pool.acquire() as conn:
+                    await dq.activate_duel(conn, duel_id, str(channel.id))
+                    await self._setup_problems(conn, duel_id, mode,
+                                               p1_rating["rating"], p2_rating["rating"],
+                                               cfg, format_num=format_num)
+            except Exception:
+                # CRITICAL: if channel creation or problem setup fails, the
+                # duel row must NOT stay 'pending'/'active' — that would
+                # permanently block both players (one-match-at-a-time check)
+                # and leave an orphan room where no match ever started.
+                await self._void_failed_setup(duel_id, channel)
+                raise
+            # ── Jump-link back to the original channel ──
+            try:
+                jump = _brand("__Match room is live.__", color=CLR_WIN, thumb=False)
+                jump.description = f"→ {channel.mention}"
+                jump.set_footer(text="Tap the channel to jump straight in.", icon_url=BOT_LOGO)
+                jump_msg = await self._send_branded(ctx.channel, embed=jump)
+                if jump_msg:
+                    self._live_cards[duel_id] = jump_msg
+            except Exception:
+                pass
+
             if _is_duel_mode(mode):
                 await self._start_duel_match(channel, duel_id, mode, cfg)
             else:
@@ -578,13 +873,31 @@ class Duels(commands.Cog):
                         is_bot_match=True, bot_rating=bot_rating,
                         total_games=format_num, duel_number=duel_num)
 
-            channel = await self._create_duel_channel(ctx, challenger, None, mode, duel_num, is_bot=True)
+            channel = None
+            try:
+                channel = await self._create_duel_channel(ctx, challenger, None, mode, duel_num, is_bot=True)
 
-            async with pool.acquire() as conn:
-                await dq.activate_duel(conn, duel_id, str(channel.id))
-                await self._setup_problems(conn, duel_id, mode,
-                                           p1_rating["rating"], bot_rating, cfg,
-                                           is_bot=True, format_num=format_num)
+                async with pool.acquire() as conn:
+                    await dq.activate_duel(conn, duel_id, str(channel.id))
+                    await self._setup_problems(conn, duel_id, mode,
+                                               p1_rating["rating"], bot_rating, cfg,
+                                               is_bot=True, format_num=format_num)
+            except Exception:
+                # Same cleanup as human matches: never leave a stale
+                # 'pending'/'active' duel row + orphan room behind.
+                await self._void_failed_setup(duel_id, channel)
+                raise
+            # ── Jump-link back to the original channel ──
+            try:
+                jump = _brand("__Match room is live.__", color=CLR_WIN, thumb=False)
+                jump.description = f"→ {channel.mention}"
+                jump.set_footer(text="Tap the channel to jump straight in.", icon_url=BOT_LOGO)
+                jump_msg = await self._send_branded(ctx.channel, embed=jump)
+                if jump_msg:
+                    self._live_cards[duel_id] = jump_msg
+            except Exception:
+                pass
+
             if _is_duel_mode(mode):
                 await self._start_duel_match(channel, duel_id, mode, cfg, is_bot=True)
             else:
@@ -601,10 +914,11 @@ class Duels(commands.Cog):
     async def _create_duel_channel(self, ctx, player1, player2, mode: str,
                                    duel_number: int, is_bot: bool = False) -> discord.TextChannel:
         family = MODES[mode]["family"]
+        kind = "duel" if _is_duel_mode(mode) else "blitz"   # room name matches the actual format
         if is_bot:
-            channel_name = f"{family}-duel-{duel_number}-{player1.name}-vs-bot"
+            channel_name = f"{family}-{kind}-{duel_number}-{player1.name}-vs-bot"
         else:
-            channel_name = f"{family}-duel-{duel_number}-{player1.name}-vs-{player2.name}"
+            channel_name = f"{family}-{kind}-{duel_number}-{player1.name}-vs-{player2.name}"
         channel_name = channel_name.lower().replace(" ", "-")[:100]
 
         guild = ctx.guild
@@ -654,8 +968,8 @@ class Duels(commands.Cog):
             reason=f"Duel: {p1.name} vs {p2.name if p2 else 'Bot'}")
 
         mode_label = MODES[mode]["label"]
-        topic = (f"🤖 {mode_label} • {p1.name} vs Bot" if is_bot
-                 else f"⚔️ {mode_label} • {p1.name} vs {p2.name}")
+        topic = (f"🤖 {mode_label} · {p1.name} vs Bot" if is_bot
+                 else f"{mode_label} · {p1.name} vs {p2.name}")
         try:
             await channel.edit(topic=topic)
         except Exception:
@@ -724,11 +1038,12 @@ class Duels(commands.Cog):
 
     def _problem_embed(self, prob: dict, idx: int, total: int, mode: str,
                        header: str | None = None) -> discord.Embed:
-        em = discord.Embed(title=header or f"🧩 Problem {idx}/{total}", color=COLOR_CYAN)
-        em.add_field(name="📌 Problem", value=f"[{prob['title']}]({prob['url']})", inline=False)
-        em.add_field(name="🔹 Difficulty", value=_problem_difficulty_display(prob), inline=True)
-        if prob.get("topic"):
-            em.add_field(name="🏷️ Tags", value=prob["topic"], inline=False)
+        em = _brand(header or f"Problem {idx}/{total}", color=CLR_MATCH, thumb=False)
+        em.add_field(
+            name="__Problem__",
+            value=f"[{prob['title']}]({prob['url']})\n"
+                  f"Difficulty `{_problem_difficulty_display(prob)}`",
+            inline=False)
         return em
 
     # ══════════════════════════════════════════════════════════════════════
@@ -756,43 +1071,65 @@ class Duels(commands.Cog):
         p2_rating = (await self._get_or_create_duel_rating(p2, channel.guild, mode)
                      if p2 else {"rating": duel["bot_rating"]})
         p1_name = p1.display_name if p1 else "Player 1"
-        p2_name = p2.display_name if p2 else "Binary Bot"
+        p2_name = p2.display_name if p2 else "Z4s"
         p1_rank = duel_ranks.get_rank(p1_rating["rating"])
         p2_rank = duel_ranks.get_rank(p2_rating["rating"])
 
         idx, total = duel["current_game"], duel["total_games"]
         per = _blitz_secs_for(idx, total)
 
-        em = discord.Embed(
-            title=f"🧩 Problem {idx}/{total}",
-            description=f"**{MODES[mode]['label']}** Match #{duel['duel_number'] or '?'} • fast fingers!",
-            color=COLOR_CYAN)
-        em.add_field(name="🎯 Players", value=f"{p1_name} vs {p2_name}", inline=False)
-        em.add_field(name="📊 Ratings",
-                     value=f"**{p1_rank['name']}** ({p1_rating['rating']}) vs **{p2_rank['name']}** ({p2_rating['rating']})",
-                     inline=False)
-        em.add_field(name="📌 Problem", value=f"[{prob['title']}]({prob['url']})", inline=False)
-        em.add_field(name="🔹 Difficulty", value=_problem_difficulty_display(prob), inline=True)
-        em.add_field(name="⏱️ Time Limit", value=_fmt_secs(per), inline=True)
-        if prob.get("topic"):
-            em.add_field(name="🏷️ Tags", value=prob["topic"], inline=False)
-        em.set_footer(text="First verified solve takes this problem • Forfeit costs 32 rating")
+        match_num = duel['duel_number'] or '?'
+        is_first = (idx == 1)
+        em = _brand(
+            f"__{MODES[mode]['label']} — Match #{match_num}__",
+            color=CLR_MATCH, banner=is_first)
 
-        msg = await channel.send(embed=em, view=SubmissionCheckerView(self, duel_id))
-        if idx == 1:
-            await channel.send("🏳️ Want to give up? (-32 rating):", view=ForfeitView(self, duel_id))
+        if is_first:
+            # VS card with centered alignment
+            vs_line = f"{p1_name}  vs  {p2_name}"
+            rat_line = f"{p1_rank['name']} ({p1_rating['rating']})  ·  ({p2_rating['rating']}) {p2_rank['name']}"
+            w = max(len(vs_line), len(rat_line)) + 4
+            em.description = (
+                f"**{MODE_BLURB[mode]}** · **{total}** problems, one at a time\n\n"
+                f"```\n"
+                f"{vs_line:^{w}}\n"
+                f"{rat_line:^{w}}\n"
+                f"```\n"
+                f"First verified solve takes each problem.\n"
+                f"Timer expires → draw → next problem.")
+        else:
+            em.description = (
+                f"**{MODE_BLURB[mode]}** · Problem **{idx}** of **{total}**")
 
-        countdown = int(cfg.get("countdown_seconds", 3))
-        for i in range(countdown, 0, -1):
-            await asyncio.sleep(1)
-            try:
-                await msg.edit(content=f"**{i}**")
-            except Exception:
-                pass
-        try:
-            await msg.edit(content="**GO!**")
-        except Exception:
-            pass
+        em.add_field(
+            name=f"__Problem {idx}/{total}__",
+            value=f"[{prob['title']}]({prob['url']})", inline=True)
+        em.add_field(
+            name="__Difficulty__",
+            value=f"`{_problem_difficulty_display(prob)}`", inline=True)
+        em.add_field(
+            name="__Time Limit__",
+            value=f"`{_fmt_secs(per)}`", inline=True)
+
+        em.set_footer(
+            text="First verified solve takes this problem · Forfeit costs 32 rating",
+            icon_url=BOT_LOGO)
+
+        # 1) Countdown message first (appears above)
+        cd_msg = await self._run_countdown(channel, seconds=7)
+
+        # 2) Match embed below
+        if is_first:
+            msg = await channel.send(embed=em, view=MatchControlView(self, duel_id))
+            p1_mention = f"<@{p1_id}>"
+            p2_mention = f"<@{p2_id}>" if p2_id else ""
+            await self._send_branded(channel,
+                content=f"{p1_mention} {p2_mention} — the arena is live. Good luck.")
+        else:
+            msg = await channel.send(embed=em, view=SubmissionCheckerView(self, duel_id))
+
+        # 3) Animate countdown above, then delete
+        await self._animate_countdown(cd_msg, seconds=7)
 
         async with pool.acquire() as conn:
             deadline = datetime.now(timezone.utc) + timedelta(seconds=per)
@@ -825,9 +1162,25 @@ class Duels(commands.Cog):
                     return
                 await dq.mark_solved(conn, prob["id"], "p2", datetime.now(timezone.utc))
             try:
-                await channel.send(f"🤖 Bot solved **{prob['title']}** in {_fmt_secs(solve_time)}!")
+                await self._send_branded(channel, content=f"Bot solved **{prob['title']}** in {_fmt_secs(solve_time)}.")
             except Exception:
                 pass
+            # A bot solve is known instantly — resolve the problem NOW instead
+            # of waiting for a human Check click or the deadline sweep (the
+            # old behavior left the match frozen after the bot solved).
+            # Same lock→conn ordering as blitz_check / auto_check; the resolve
+            # still queries the human's submissions first, so if the player
+            # solved earlier but never clicked Check, their timestamp wins.
+            lock = _resolve_locks.setdefault(duel_id, asyncio.Lock())
+            async with lock:
+                async with pool.acquire() as conn:
+                    fresh = await dq.get_duel(conn, duel_id)
+                    if not fresh or fresh["status"] != "active":
+                        return
+                    fresh = dict(fresh)
+                    prob_row = await dq.get_current_problem(conn, fresh["id"], fresh["current_game"])
+                    if prob_row and prob_row["id"] == prob["id"]:
+                        await self._resolve_blitz_problem(conn, fresh, dict(prob_row), channel)
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -835,23 +1188,34 @@ class Duels(commands.Cog):
 
     async def blitz_check(self, interaction: discord.Interaction, duel: dict):
         """Check Submissions handler for BLITZ matches."""
-        pool = get_pool()
-        async with pool.acquire() as conn:
-            prob = await dq.get_current_problem(conn, duel["id"], duel["current_game"])
-            if not prob:
-                await interaction.followup.send("❌ No active problem found.", ephemeral=True)
-                return
-            outcome = await self._resolve_blitz_problem(conn, duel, dict(prob), interaction.channel)
+        lock = _resolve_locks.setdefault(duel["id"], asyncio.Lock())
+        async with lock:
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                # Re-fetch under the lock — another Check / the expiry sweep
+                # may have just resolved this problem or ended the match.
+                fresh = await dq.get_duel(conn, duel["id"])
+                if not fresh or fresh["status"] != "active":
+                    await interaction.followup.send("❌ This duel isn't active anymore.", ephemeral=True)
+                    return
+                fresh = dict(fresh)
+                prob = await dq.get_current_problem(conn, fresh["id"], fresh["current_game"])
+                if not prob:
+                    await interaction.followup.send("❌ No active problem found.", ephemeral=True)
+                    return
+                outcome = await self._resolve_blitz_problem(conn, fresh, dict(prob), interaction.channel)
         if outcome == "match_over":
-            msg = "✅ Checked — match finished! Result posted above."
+            msg = "Checked — match finished. Result posted above."
         elif outcome == "problem_over":
-            msg = "✅ Checked — problem decided! Next problem starting."
+            msg = "Checked — problem decided. Next problem starting."
         else:
-            msg = "⏳ Checked — no verified solve yet. Keep going!"
+            msg = "Checked — no verified solve yet. Keep going."
         await interaction.followup.send(msg, ephemeral=True)
 
     async def _resolve_blitz_problem(self, conn, duel: dict, prob: dict, channel) -> str:
         """Returns 'match_over' | 'problem_over' | 'pending'."""
+        if prob.get("game_winner"):
+            return "pending"  # already decided by a concurrent resolver
         p1_id, p2_id = duel["player1_id"], duel["player2_id"]
         since = _aware(duel.get("started_at")) or (datetime.now(timezone.utc) - timedelta(hours=6))
 
@@ -887,7 +1251,7 @@ class Duels(commands.Cog):
         await dq.bump_game_score(conn, duel["id"], winner)
 
         t = self._bot_solve_tasks.pop(duel["id"], None)
-        if t:
+        if t and t is not asyncio.current_task():
             t.cancel()
 
         updated = dict(await dq.get_duel(conn, duel["id"]))
@@ -900,15 +1264,15 @@ class Duels(commands.Cog):
         p1_user = self.bot.get_user(int(p1_id))
         p2_user = self.bot.get_user(int(p2_id)) if p2_id else None
         p1_name = p1_user.display_name if p1_user else "Player 1"
-        p2_name = p2_user.display_name if p2_user else "Binary Bot"
+        p2_name = p2_user.display_name if p2_user else "Z4s"
         if winner == "p1":
-            line = f"🏁 **Problem {done}:** {p1_name} takes it!"
+            line = f"**Problem {done}:** {p1_name} takes it."
         elif winner == "p2":
-            line = f"🏁 **Problem {done}:** {p2_name} takes it!"
+            line = f"**Problem {done}:** {p2_name} takes it."
         else:
-            line = f"🏁 **Problem {done}:** Draw (time expired)."
+            line = f"**Problem {done}:** Draw (time expired)."
         try:
-            await channel.send(f"{line}  Score: **{p1_w} — {p2_w}**")
+            await self._send_branded(channel, content=f"{line}  Score: **{p1_w} — {p2_w}**")
         except Exception:
             pass
 
@@ -956,43 +1320,55 @@ class Duels(commands.Cog):
         p2_rating = (await self._get_or_create_duel_rating(p2, channel.guild, mode)
                      if p2 else {"rating": duel["bot_rating"]})
         p1_name = p1.display_name if p1 else "Player 1"
-        p2_name = p2.display_name if p2 else "Binary Bot"
+        p2_name = p2.display_name if p2 else "Z4s"
         p1_rank = duel_ranks.get_rank(p1_rating["rating"])
         p2_rank = duel_ranks.get_rank(p2_rating["rating"])
 
-        em = discord.Embed(
-            title=f"⚔️ {MODES[mode]['label']} — Match #{duel['duel_number'] or '?'}",
-            description=(f"**ICPC-style contest** • {n} problems • **{total_secs // 60} minutes total**\n"
-                         f"Solve in order. Your next problem unlocks (privately) when you "
-                         f"finish the current one. Solve everything to end the match early!"),
-            color=COLOR_CYAN)
-        em.add_field(name="🎯 Players", value=f"{p1_name} vs {p2_name}", inline=False)
-        em.add_field(name="📊 Ratings",
-                     value=f"**{p1_rank['name']}** ({p1_rating['rating']}) vs **{p2_rank['name']}** ({p2_rating['rating']})",
-                     inline=False)
+        match_num = duel['duel_number'] or '?'
+        em = _brand(
+            f"__{MODES[mode]['label']} — Match #{match_num}__",
+            color=CLR_MATCH, banner=True)
+
+        # VS card with centered alignment
+        vs_line = f"{p1_name}  vs  {p2_name}"
+        rat_line = f"{p1_rank['name']} ({p1_rating['rating']})  ·  ({p2_rating['rating']}) {p2_rank['name']}"
+        w = max(len(vs_line), len(rat_line)) + 4
+        em.description = (
+            f"**{MODE_BLURB[mode]}** · **{n}** problems · **{total_secs // 60} min** total\n\n"
+            f"```\n"
+            f"{vs_line:^{w}}\n"
+            f"{rat_line:^{w}}\n"
+            f"```\n"
+            f"Solve in order. Next problem unlocks (privately)\n"
+            f"when you finish the current one.")
+
         first = probs[0]
-        em.add_field(name=f"🧩 Problem 1/{n}",
-                     value=f"[{first['title']}]({first['url']})", inline=False)
-        em.add_field(name="🔹 Difficulty", value=_problem_difficulty_display(first), inline=True)
-        em.add_field(name="⏱️ Total Time", value=_fmt_secs(total_secs), inline=True)
-        if first.get("topic"):
-            em.add_field(name="🏷️ Tags", value=first["topic"], inline=False)
-        em.set_footer(text="Scoring: solves → total time tiebreak • Click Check after each solve")
+        em.add_field(
+            name=f"__Problem 1/{n}__",
+            value=f"[{first['title']}]({first['url']})", inline=True)
+        em.add_field(
+            name="__Difficulty__",
+            value=f"`{_problem_difficulty_display(first)}`", inline=True)
+        em.add_field(
+            name="__Total Time__",
+            value=f"`{_fmt_secs(total_secs)}`", inline=True)
 
-        msg = await channel.send(embed=em, view=SubmissionCheckerView(self, duel_id))
-        await channel.send("🏳️ Want to give up? (-32 rating):", view=ForfeitView(self, duel_id))
+        em.set_footer(
+            text="Scoring: solves → total time tiebreak · Check after each solve",
+            icon_url=BOT_LOGO)
 
-        countdown = int(cfg.get("countdown_seconds", 3))
-        for i in range(countdown, 0, -1):
-            await asyncio.sleep(1)
-            try:
-                await msg.edit(content=f"**{i}**")
-            except Exception:
-                pass
-        try:
-            await msg.edit(content="**GO!**")
-        except Exception:
-            pass
+        # 1) Countdown message first (appears above)
+        cd_msg = await self._run_countdown(channel, seconds=7)
+
+        # 2) Match embed below
+        msg = await channel.send(embed=em, view=MatchControlView(self, duel_id))
+        p1_mention = f"<@{p1_id}>"
+        p2_mention = f"<@{p2_id}>" if p2_id else ""
+        await self._send_branded(channel,
+            content=f"{p1_mention} {p2_mention} — the arena is live. Good luck.")
+
+        # 3) Animate countdown above, then delete
+        await self._animate_countdown(cd_msg, seconds=7)
 
         # Reset the shared deadline + start time now that the countdown finished
         deadline = datetime.now(timezone.utc) + timedelta(seconds=total_secs)
@@ -1038,7 +1414,7 @@ class Duels(commands.Cog):
                         return
                     await dq.mark_solved(conn, prob["id"], "p2", datetime.now(timezone.utc))
                 try:
-                    await channel.send(f"🤖 Bot solved **Problem {prob['game_number']}**!")
+                    await self._send_branded(channel, content=f"Bot solved **Problem {prob['game_number']}**.")
                 except Exception:
                     pass
             # Bot solved everything → match ends early
@@ -1080,7 +1456,7 @@ class Duels(commands.Cog):
                     break
 
             if current is None:
-                await interaction.followup.send("🎉 You've already finished all problems!", ephemeral=True)
+                await interaction.followup.send("You've already finished all problems.", ephemeral=True)
                 return
 
             since = _aware(duel.get("started_at")) or (datetime.now(timezone.utc) - timedelta(hours=6))
@@ -1089,8 +1465,8 @@ class Duels(commands.Cog):
 
             if not solve_ts:
                 em = self._problem_embed(current, current["game_number"], n, duel["mode"],
-                                         header=f"⏳ Your current problem — {current['game_number']}/{n}")
-                em.set_footer(text="No verified solve yet. This message is only visible to you.")
+                                         header=f"Your current problem — {current['game_number']}/{n}")
+                em.set_footer(text="No verified solve yet. Only you can see this.", icon_url=BOT_LOGO)
                 await interaction.followup.send(embed=em, ephemeral=True)
                 return
 
@@ -1099,19 +1475,19 @@ class Duels(commands.Cog):
 
         name = interaction.user.display_name
         try:
-            await interaction.channel.send(f"✅ **{name}** solved Problem {k}/{n}!")
+            await self._send_branded(interaction.channel, content=f"**{name}** solved Problem {k}/{n}.")
         except Exception:
             pass
 
         if k == n:
-            await interaction.followup.send("🏆 You solved everything! Finalizing the match…", ephemeral=True)
+            await interaction.followup.send("You solved everything — finalizing the match.", ephemeral=True)
             await self._finalize_duel(interaction.channel, duel["id"])
             return
 
         nxt = probs[k]  # probs is 0-indexed, so probs[k] is problem k+1
         em = self._problem_embed(nxt, k + 1, n, duel["mode"],
-                                 header=f"🔓 Problem {k + 1}/{n} unlocked!")
-        em.set_footer(text="Only YOU can see this. Your opponent must solve their way here.")
+                                 header=f"Problem {k + 1}/{n} unlocked")
+        em.set_footer(text="Only you can see this. Your opponent must solve their way here.", icon_url=BOT_LOGO)
         await interaction.followup.send(embed=em, ephemeral=True)
 
     async def _finalize_duel(self, channel, duel_id: int):
@@ -1169,7 +1545,11 @@ class Duels(commands.Cog):
                 refreshed = dict(await dq.get_duel(conn, duel_id))
 
             t = self._bot_solve_tasks.pop(duel_id, None)
-            if t:
+            # NEVER cancel ourselves: when the bot solves its last problem,
+            # this finalize runs INSIDE the bot-sim task — cancelling it here
+            # killed the finish flow mid-air (status already 'finished', so
+            # auto_check ignored it too → orphan room, no stats, no ratings).
+            if t and t is not asyncio.current_task():
                 t.cancel()
 
             extra = None
@@ -1301,6 +1681,14 @@ class Duels(commands.Cog):
     async def _finish_match(self, channel, duel: dict, forfeited_by: str = None,
                             forfeit_ratings: dict = None, result_override=None,
                             extra_lines: list[str] | None = None):
+        # A match must never finish twice — forfeit racing an auto-check
+        # expiry, or two resolvers reaching match_over back-to-back, would
+        # otherwise double-post stats and double-apply ratings.
+        did = duel.get("id")
+        if did in self._finished:
+            print(f"[FINISH] ⏭️ duel {did} already finishing — skipped duplicate.", flush=True)
+            return
+        self._finished.add(did)
         try:
             pool = get_pool()
             mode = duel["mode"]
@@ -1310,7 +1698,7 @@ class Duels(commands.Cog):
             p1 = self.bot.get_user(int(p1_id))
             p2 = self.bot.get_user(int(p2_id)) if p2_id else None
             p1_name = p1.display_name if p1 else f"Player {p1_id}"
-            p2_name = p2.display_name if p2 else "Binary Bot"
+            p2_name = p2.display_name if p2 else "Z4s"
 
             if forfeit_ratings is None:
                 async with pool.acquire() as conn:
@@ -1336,53 +1724,71 @@ class Duels(commands.Cog):
             score_str = f"{p1_w}-{p2_w}"
 
             # 1) quick result in the private room
-            quick = discord.Embed(
-                title="✅ Match Complete!",
-                description=(f"**{winner_name}** wins {score_str}"
-                             if winner_name != "Draw" else f"**Draw** {score_str}"),
-                color=0x57F287 if winner_name != "Draw" else COLOR_CYAN)
-            rating_lines = f"{p1_name}: {ratings['p1_delta']:+d}"
+            quick_color = CLR_WIN if winner_name != "Draw" else CLR_MATCH
+            quick_title = (f"**{winner_name}** wins {score_str}"
+                           if winner_name != "Draw" else f"Draw — {score_str}")
+            quick = _brand("__Match Complete__", desc=quick_title, color=quick_color, thumb=False)
+
+            quick.add_field(
+                name=f"__{p1_name}__",
+                value=f"`{ratings['p1_old']}` → `{ratings['p1_new']}` ({ratings['p1_delta']:+d})",
+                inline=True)
             if p2_id:
-                rating_lines += f"\n{p2_name}: {ratings['p2_delta']:+d}"
-            quick.add_field(name="📈 Rating Changes", value=rating_lines, inline=False)
+                quick.add_field(
+                    name=f"__{p2_name}__",
+                    value=f"`{ratings['p2_old']}` → `{ratings['p2_new']}` ({ratings['p2_delta']:+d})",
+                    inline=True)
             if extra_lines:
-                quick.add_field(name="📋 Details", value="\n".join(extra_lines), inline=False)
-            quick.set_footer(text="Posting stats to the public channel… room closes in 10s")
+                quick.add_field(name="__Details__", value="\n".join(extra_lines), inline=False)
+            quick.set_footer(text="Posting stats to the public channel… room closes in 10s", icon_url=BOT_LOGO)
             try:
-                await channel.send(embed=quick)
+                await self._send_branded(channel, embed=quick)
             except Exception:
                 pass
 
             # 2) public stats
             stats_ch = self._find_stats_channel(channel.guild, mode)
             if stats_ch:
-                color = 0xFF6B6B if forfeited_by else (0x57F287 if winner_name != "Draw" else COLOR_CYAN)
-                title = "🏆 Match Result (Forfeit)" if forfeited_by else "🏆 Match Result"
-                em = discord.Embed(
-                    title=title,
-                    description=f"{MODES[mode]['label']} • Match #{duel.get('duel_number') or '?'}",
-                    color=color)
-                em.add_field(name="👥 Players", value=f"{p1_name} vs {p2_name}", inline=False)
-                result = (f"**{winner_name}** wins {score_str}" if winner_name != "Draw"
-                          else f"**Draw** {score_str}")
+                s_color = CLR_LOSS if forfeited_by else (CLR_RESULT if winner_name != "Draw" else CLR_MATCH)
+                s_title = "__Match Result (Forfeit)__" if forfeited_by else "__Match Result__"
+                match_num = duel.get('duel_number') or '?'
+                em = _brand(s_title, color=s_color, banner=True)
+
+                result_line = (f"**{winner_name}** wins {score_str}" if winner_name != "Draw"
+                               else f"Draw — {score_str}")
                 if forfeited_by:
-                    result += f"\n({forfeited_by} forfeited)"
-                em.add_field(name="📊 Result", value=result, inline=False)
-                em.add_field(name=f"📈 {p1_name}",
-                             value=f"{ratings['p1_old']} → {ratings['p1_new']} ({ratings['p1_delta']:+d})",
-                             inline=True)
+                    result_line += f"\n*{forfeited_by} forfeited*"
+
+                em.description = (
+                    f"{MODES[mode]['label']} · Match #{match_num} · "
+                    f"{duel['total_games']}-Problem\n"
+                    f"\n"
+                    f"{result_line}")
+
+                # Rating fields
+                p1_delta = ratings['p1_delta']
+                p1_arrow = f"{'📈' if p1_delta >= 0 else '📉'}"
+                em.add_field(
+                    name=f"{p1_arrow} {p1_name}",
+                    value=f"`{ratings['p1_old']}` → `{ratings['p1_new']}` **({p1_delta:+d})**",
+                    inline=True)
                 if p2_id:
-                    em.add_field(name=f"📈 {p2_name}",
-                                 value=f"{ratings['p2_old']} → {ratings['p2_new']} ({ratings['p2_delta']:+d})",
-                                 inline=True)
-                em.add_field(name="📋 Format", value=f"{duel['total_games']}-Problem Match", inline=True)
+                    p2_delta = ratings['p2_delta']
+                    p2_arrow = f"{'📈' if p2_delta >= 0 else '📉'}"
+                    em.add_field(
+                        name=f"{p2_arrow} {p2_name}",
+                        value=f"`{ratings['p2_old']}` → `{ratings['p2_new']}` **({p2_delta:+d})**",
+                        inline=True)
+
                 rank = duel_ranks.get_rank(ratings["p1_new"])
-                em.add_field(name=f"🏅 {p1_name}'s Rank", value=rank["name"], inline=True)
+                rank_line = f"{p1_name}: **{rank['name']}**"
                 if extra_lines:
-                    em.add_field(name="📋 Details", value="\n".join(extra_lines), inline=False)
-                em.set_footer(text=f"Completed at {_ist_now_str()}")
+                    rank_line += "\n" + "\n".join(extra_lines)
+                em.add_field(name="__Details__", value=rank_line, inline=False)
+
+                em.set_footer(text=f"Completed at {_ist_now_str()}", icon_url=BOT_LOGO)
                 try:
-                    await stats_ch.send(embed=em)
+                    await self._send_branded(stats_ch, embed=em)
                     print(f"[FINISH] ✅ Stats → #{stats_ch.name}", flush=True)
                 except Exception as e:
                     print(f"[FINISH] ❌ stats post failed: {e}", flush=True)
@@ -1390,10 +1796,21 @@ class Duels(commands.Cog):
                 print(f"[FINISH] ❌ no stats channel for {mode}", flush=True)
 
             t = self._bot_solve_tasks.pop(duel["id"], None)
-            if t:
+            if t and t is not asyncio.current_task():
                 t.cancel()
 
-            # 3) delete the room
+            # 3) edit jump-link card → "Match ended" → auto-delete
+            jump_msg = self._live_cards.pop(duel["id"], None)
+            if jump_msg:
+                try:
+                    ended = _brand("__Match ended.__", color=CLR_NEUTRAL, thumb=False)
+                    ended.set_footer(text="Room closing.", icon_url=BOT_LOGO)
+                    await jump_msg.edit(embed=ended)
+                    await jump_msg.delete(delay=10)
+                except Exception:
+                    pass
+
+            # 4) delete the room
             await asyncio.sleep(10)
             try:
                 await channel.delete(reason="Duel finished")
@@ -1460,22 +1877,21 @@ class Duels(commands.Cog):
                        "p2_old": f_old, "p2_new": f_old - FORFEIT_PENALTY, "p2_delta": -FORFEIT_PENALTY}
 
         t = self._bot_solve_tasks.pop(duel_id, None)
-        if t:
+        if t and t is not asyncio.current_task():
             t.cancel()
 
-        forfeit_embed = discord.Embed(
-            title="🏳️ Match Forfeited",
-            description=f"{interaction.user.mention} has forfeited the match.",
-            color=0xFF6B6B)
-        forfeit_embed.add_field(name="❌ Rating Penalty",
-                                value=f"{interaction.user.display_name}: **-{FORFEIT_PENALTY} rating**",
-                                inline=False)
+        forfeit_embed = _brand(
+            "__Match Forfeited__",
+            desc=f"{interaction.user.mention} forfeited.\n"
+                 f"**−{FORFEIT_PENALTY} rating** for {interaction.user.display_name}.",
+            color=CLR_LOSS, thumb=False)
+        forfeit_embed.set_footer(text=BRAND, icon_url=BOT_LOGO)
         try:
-            await interaction.channel.send(embed=forfeit_embed)
+            await self._send_branded(interaction.channel, embed=forfeit_embed)
         except Exception:
             pass
         await interaction.followup.send(
-            f"✅ Match forfeited. You lost {FORFEIT_PENALTY} rating points.", ephemeral=True)
+            f"Match forfeited. −{FORFEIT_PENALTY} rating.", ephemeral=True)
 
         await self._finish_match(interaction.channel, duel,
                                  forfeited_by=interaction.user.display_name,
@@ -1500,6 +1916,7 @@ class Duels(commands.Cog):
                 if not channel:
                     continue
                 needs_duel_finalize = False
+                needs_blitz_resolve = False
                 async with pool.acquire() as conn:
                     prob = await dq.get_current_problem(conn, duel["id"], duel["current_game"])
                     if not prob:
@@ -1511,9 +1928,27 @@ class Duels(commands.Cog):
                     if _is_duel_mode(duel["mode"]):
                         needs_duel_finalize = True
                     else:
-                        await self._resolve_blitz_problem(conn, duel, prob, channel)
+                        needs_blitz_resolve = True
                 if needs_duel_finalize:
                     await self._finalize_duel(channel, duel["id"])
+                elif needs_blitz_resolve:
+                    # lock → conn ordering, same as blitz_check, so the sweep
+                    # can never double-resolve a problem against a player's
+                    # simultaneous Check click.
+                    lock = _resolve_locks.setdefault(duel["id"], asyncio.Lock())
+                    async with lock:
+                        async with pool.acquire() as conn:
+                            fresh = await dq.get_duel(conn, duel["id"])
+                            if not fresh or fresh["status"] != "active":
+                                continue
+                            fresh = dict(fresh)
+                            fprob = await dq.get_current_problem(conn, fresh["id"], fresh["current_game"])
+                            if not fprob:
+                                continue
+                            fprob = dict(fprob)
+                            fdl = _aware(fprob.get("deadline_at"))
+                            if fdl and datetime.now(timezone.utc) > fdl:
+                                await self._resolve_blitz_problem(conn, fresh, fprob, channel)
             except Exception as e:
                 print(f"[AUTO] duel {duel.get('id')} error: {e}", flush=True)
 
@@ -1544,12 +1979,17 @@ class Duels(commands.Cog):
                             if str(d.get("channel_id")) == str(channel.id)), None)
                 if not duel:
                     return
+                # Void cleanly: no winner, no rating change, and score reset
+                # to 0-0 so the DB row can't be misread as a real result.
+                await conn.execute(
+                    "UPDATE duels SET p1_games_won=0, p2_games_won=0 WHERE id=$1",
+                    duel["id"])
                 await dq.finish_duel(conn, duel["id"], None)
             print(f"[DUEL] ⚠️ Channel for active duel #{duel.get('duel_number')} "
                   f"(id={duel['id']}) was deleted externally — match voided, "
                   f"no rating changes applied.", flush=True)
             t = self._bot_solve_tasks.pop(duel["id"], None)
-            if t:
+            if t and t is not asyncio.current_task():
                 t.cancel()
         except Exception as e:
             print(f"[DUEL] on_guild_channel_delete error: {e}", flush=True)
