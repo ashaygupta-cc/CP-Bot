@@ -7,12 +7,22 @@ platforms/codechef.py — CodeChef adapter.
     endpoint. If CodeChef changes their HTML/API this may break.
 
 Problem ID format: problem CODE  e.g. 'CHEFEZ'
+
+NOTE: added a browser-like User-Agent on every request below. CodeChef's
+unofficial endpoints sometimes return empty/garbage bodies to requests
+that don't look like they came from a browser — this mirrors the headers
+already used successfully in the extension's codechef.js scraper.
 """
 
 import aiohttp
 from platforms.base import PlatformAdapter, Submission
 
 CC_BASE = "https://www.codechef.com"
+
+_HEADERS = {
+    "X-Requested-With": "XMLHttpRequest",
+    "User-Agent": "Mozilla/5.0 (compatible; CPBot/1.0)",
+}
 
 
 class CodeChefAdapter(PlatformAdapter):
@@ -29,7 +39,7 @@ class CodeChefAdapter(PlatformAdapter):
         """Checks the public profile page for a 200 status."""
         url = f"{CC_BASE}/users/{handle}"
         try:
-            async with aiohttp.ClientSession() as s:
+            async with aiohttp.ClientSession(headers=_HEADERS) as s:
                 async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                     if r.status == 200:
                         return True, f"✅ Found CodeChef profile for `{handle}`."
@@ -44,10 +54,9 @@ class CodeChefAdapter(PlatformAdapter):
         For production use, implement OAuth 2.0 via https://api.codechef.com/
         """
         url = f"{CC_BASE}/recent/user?user_handle={handle}&page=0"
-        headers = {"X-Requested-With": "XMLHttpRequest"}
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            async with aiohttp.ClientSession(headers=_HEADERS) as s:
+                async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                     data = await r.json(content_type=None)
         except Exception as e:
             raise RuntimeError(f"CodeChef API error: {e}")
@@ -64,7 +73,9 @@ class CodeChefAdapter(PlatformAdapter):
             ))
         return results
 
-    async def check_solved(self, handle: str, problem_id: str, since_ts: float, until_ts: float = None) -> tuple[bool, str]:
+    async def check_solved(
+        self, handle: str, problem_id: str, since_ts: float, until_ts: float = None
+    ) -> tuple[bool, str]:
         """
         Checks recent submissions for an AC on the given problem.
         Limitation: no timestamps available from this endpoint,

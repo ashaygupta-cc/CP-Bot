@@ -70,7 +70,15 @@ class AtCoderAdapter(PlatformAdapter):
             ))
         return results
 
-    async def check_solved(self, handle: str, problem_id: str, since_ts: float, until_ts: float = None) -> tuple[bool, str]:
+    async def check_solved(
+        self, handle: str, problem_id: str, since_ts: float, until_ts: float = None
+    ) -> tuple[bool, str]:
+        """
+        FIX: previously accepted `until_ts` but never used it, so a solve
+        submitted well AFTER the assigned day's window (e.g. next week,
+        same problem_id re-solved/upsolved) would still match and get
+        wrongly credited to an earlier day. Now bounded both sides.
+        """
         url = (
             f"{KENKOOOO}/atcoder-api/v3/user/submissions"
             f"?user={handle}&from_second={int(since_ts)}"
@@ -87,7 +95,11 @@ class AtCoderAdapter(PlatformAdapter):
 
         pid = problem_id.lower()
         for sub in data:
-            if sub.get("problem_id", "").lower() == pid and sub.get("result") == "AC":
-                return True, "✅ Accepted"
+            if sub.get("problem_id", "").lower() != pid or sub.get("result") != "AC":
+                continue
+            sub_time = sub.get("epoch_second", 0)
+            if until_ts is not None and sub_time > until_ts:
+                continue
+            return True, "✅ Accepted"
 
         return False, "❌ No accepted submission found within the time window."

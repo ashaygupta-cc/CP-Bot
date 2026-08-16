@@ -1,5 +1,5 @@
 """
-cogs/checker.py  — v4
+cogs/checker.py  — v5
 !check / !checkall  +  auto-checkall at 23:58 IST
 
 Rate-limit strategy
@@ -22,6 +22,17 @@ Rate-limit strategy
     • Uses the same bulk logic with generous delays — no rush.
     • Posts a summary embed to CHECKALL_CHANNEL_ID if set in config,
       otherwise logs to console only.
+
+  Codeforces block/rate-limit handling (v5 fix):
+    • Previously, if the single CF bulk fetch failed (503 / Cloudflare
+      block), the code "gracefully degraded" by falling back to N
+      separate per-problem CF API calls — which is exactly what makes a
+      block worse, since CF was already rejecting us.
+    • Now: if the CF bulk fetch fails for ANY reason, we mark all of that
+      member's CF problems as "temporarily unavailable" and move on —
+      zero extra CF requests are made. codeforces.py itself already does
+      a couple of short backoff retries before giving up, mirroring the
+      cooldown approach used in the browser-extension sync.
 
 Background tasks
 ────────────────
@@ -319,15 +330,47 @@ class Checker(commands.Cog):
                     )
                 return 0
 
-            # CF: single bulk fetch, then local filter — zero extra API calls
-            bulk_submissions = None
+            # CF: single bulk fetch, then local filter — zero extra API calls.
+            # v5 FIX: if this fails (rate-limited / Cloudflare block), do NOT
+            # fall through to per-problem CF calls — that just makes the
+            # block worse. Mark these problems unavailable and stop here.
             if platform == "cf" and hasattr(adapter, "fetch_all_submissions"):
                 try:
                     bulk_submissions = await adapter.fetch_all_submissions(handle)
                 except Exception as e:
                     print(f"[checker] CF bulk fetch failed for {handle}: {e}")
-                    # Graceful degradation: fall through to per-problem calls
+                    for idx, prob in items:
+                        results[idx] = (
+                            f"⚠️  `CF {prob['problem_id']}` — Codeforces is "
+                            f"temporarily unavailable (rate-limited/blocked). "
+                            f"Try `!check` again in a few minutes."
+                        )
+                    return 0
 
+                for idx, prob in items:
+                    pid           = prob["problem_id"]
+                    pts           = prob["points"]
+                    prob_id       = prob["id"]
+                    assigned_date = prob["assigned_date"]
+                    day_start_utc, day_end_utc = _day_window(assigned_date)
+
+                    try:
+                        solved, status = adapter.check_solved_from_submissions(
+                            bulk_submissions, pid,
+                            day_start_utc.timestamp(), day_end_utc.timestamp(),
+                        )
+                    except Exception as e:
+                        print(f"[checker] cf / {pid} local-filter error for {handle}: {e}")
+                        results[idx] = f"⚠️  `CF {pid}` — error: `{e}`"
+                        continue
+
+                    earned += await self._apply_result(
+                        results, idx, member, prob_id, pid, pts, platform, solved, status, pool, guild_id
+                    )
+
+                return earned
+
+            # Non-CF platforms: sequential per-problem calls with `delay` gaps.
             for i, (idx, prob) in enumerate(items):
                 pid           = prob["problem_id"]
                 pts           = prob["points"]
@@ -336,36 +379,17 @@ class Checker(commands.Cog):
                 day_start_utc, day_end_utc = _day_window(assigned_date)
 
                 try:
-                    if bulk_submissions is not None:
-                        solved, status = adapter.check_solved_from_submissions(
-                            bulk_submissions, pid,
-                            day_start_utc.timestamp(), day_end_utc.timestamp(),
-                        )
-                    else:
-                        if i > 0:
-                            await asyncio.sleep(delay)
-                        solved, status = await adapter.check_solved(
-                            handle, pid,
-                            day_start_utc.timestamp(), day_end_utc.timestamp(),
-                        )
+                    if i > 0:
+                        await asyncio.sleep(delay)
 
-                    if solved:
-                        async with pool.acquire() as conn:
-                            newly = await q.record_solve(
-                                conn,
-                                discord_id    = str(member.id),
-                                problem_db_id = prob_id,
-                                guild_id      = guild_id,
-                                solved_at     = datetime.now(timezone.utc),
-                                points        = pts,
-                            )
-                        if newly:
-                            earned += pts
-                            results[idx] = f"✅  `{platform.upper()} {pid}` — **Solved! +{pts} pts** 🎉"
-                        else:
-                            results[idx] = f"✅  `{platform.upper()} {pid}` — Already recorded."
-                    else:
-                        results[idx] = f"❌  `{platform.upper()} {pid}` — {status.replace('❌ ', '')}"
+                    solved, status = await adapter.check_solved(
+                        handle, pid,
+                        day_start_utc.timestamp(), day_end_utc.timestamp(),
+                    )
+
+                    earned += await self._apply_result(
+                        results, idx, member, prob_id, pid, pts, platform, solved, status, pool, guild_id
+                    )
 
                 except Exception as e:
                     print(f"[checker] {platform} / {pid} error for {handle}: {e}")
@@ -378,6 +402,31 @@ class Checker(commands.Cog):
         )
         total_earned += sum(earned_per_group)
         return results, total_earned
+
+    async def _apply_result(
+        self, results, idx, member, prob_id, pid, pts, platform, solved, status, pool, guild_id
+    ) -> int:
+        """Shared "award + format result line" logic for both CF (local-filter) and
+        per-problem (network) check paths, so the two stay in sync."""
+        if solved:
+            async with pool.acquire() as conn:
+                newly = await q.record_solve(
+                    conn,
+                    discord_id    = str(member.id),
+                    problem_db_id = prob_id,
+                    guild_id      = guild_id,
+                    solved_at     = datetime.now(timezone.utc),
+                    points        = pts,
+                )
+            if newly:
+                results[idx] = f"✅  `{platform.upper()} {pid}` — **Solved! +{pts} pts** 🎉"
+                return pts
+            else:
+                results[idx] = f"✅  `{platform.upper()} {pid}` — Already recorded."
+                return 0
+        else:
+            results[idx] = f"❌  `{platform.upper()} {pid}` — {status.replace('❌ ', '')}"
+            return 0
 
     # ── Core: bulk-check all members in a guild ───────────────────────────────
 

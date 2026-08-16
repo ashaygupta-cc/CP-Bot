@@ -1,6 +1,15 @@
 """
 platforms/leetcode.py — LeetCode adapter via GraphQL API.
 Problem ID format: title slug  e.g. 'two-sum'  (from the URL: leetcode.com/problems/two-sum/)
+
+FIX (was breaking every LeetCode check):
+  checker.py always calls check_solved(handle, problem_id, since_ts, until_ts)
+  with 4 positional args. This adapter's check_solved only accepted 3,
+  so every single LeetCode check was crashing with:
+    "check_solved() takes 4 positional arguments but 5 were given"
+  caught silently by checker.py's try/except and shown as a generic
+  "⚠️ API error" to the user. Fixed below by accepting `until_ts` and
+  using it as an upper bound so a solve isn't credited to the wrong day.
 """
 
 import aiohttp
@@ -26,13 +35,15 @@ query recentAcSubmissions($username: String!, $limit: Int!) {
 }
 """
 
+_HEADERS = {
+    "Content-Type": "application/json",
+    "Referer": "https://leetcode.com",
+    "User-Agent": "Mozilla/5.0 (compatible; CPBot/1.0)",
+}
+
 
 async def _gql(query: str, variables: dict) -> dict:
-    headers = {
-        "Content-Type": "application/json",
-        "Referer": "https://leetcode.com",
-    }
-    async with aiohttp.ClientSession(headers=headers) as s:
+    async with aiohttp.ClientSession(headers=_HEADERS) as s:
         async with s.post(
             LC_GQL,
             json={"query": query, "variables": variables},
@@ -86,20 +97,30 @@ class LeetCodeAdapter(PlatformAdapter):
             for item in items
         ]
 
-    async def check_solved(self, handle: str, problem_id: str, since_ts: float) -> tuple[bool, str]:
+    async def check_solved(
+        self, handle: str, problem_id: str, since_ts: float, until_ts: float = None
+    ) -> tuple[bool, str]:
         """
-        LeetCode's public API returns up to 15 recent AC submissions.
-        If a user has solved many problems since the assignment this may miss it,
-        but works well for typical weekly contest windows.
+        LeetCode's public API returns up to ~20 recent AC submissions via
+        recentAcSubmissionList — no arbitrary time-range query exists.
+        If the user has solved 20+ problems since the assignment this may
+        miss an older one, but it's fine for the daily/weekly check window
+        this bot uses. `until_ts` bounds it above so a same-slug solve from
+        a *future* day isn't mistakenly credited to an earlier one.
         """
         try:
-            subs = await self.get_recent_submissions(handle, limit=15)
+            subs = await self.get_recent_submissions(handle, limit=20)
         except RuntimeError as e:
             return False, f"⚠️ {e}"
 
         slug = problem_id.lower()
         for sub in subs:
-            if sub.problem_id.lower() == slug and sub.timestamp >= since_ts:
-                return True, "✅ Accepted"
+            if sub.problem_id.lower() != slug:
+                continue
+            if sub.timestamp < since_ts:
+                continue
+            if until_ts is not None and sub.timestamp > until_ts:
+                continue
+            return True, "✅ Accepted"
 
         return False, "❌ No accepted submission found within the time window."
