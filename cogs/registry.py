@@ -1,6 +1,7 @@
 """
 cogs/registry.py
-Commands: !register, !unregister, !profile, !handles
+Commands: /register, /unregister, /profile, /handles
+v2: Professional embed layout
 """
 
 import discord
@@ -10,6 +11,8 @@ from database import queries as q
 import platforms as P
 from config import COLOR_SUCCESS, COLOR_ERROR, COLOR_INFO, ADMIN_ROLE
 
+PLATFORM_ICONS = {"cf": "🔵", "lc": "🟡", "cc": "🟤", "atcoder": "🔴"}
+
 
 class Registry(commands.Cog):
     """Handle registration of CP platform accounts."""
@@ -17,33 +20,26 @@ class Registry(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # ── !register ──────────────────────────────────────────────────────────
-
     @commands.command(name="register")
     async def register(self, ctx, platform: str = None, handle: str = None):
         """
-        Link a competitive programming handle to your Discord account.
-        Usage:  !register <platform> <handle>
-        Example: !register cf tourist
-        Platforms: cf · lc · cc · atcoder
+        Link your CP handle.
+        /register cf tourist
         """
         if not platform or not handle:
-            await ctx.send(
-                f"**Usage:** `!register <platform> <handle>`\n"
-                f"**Platforms:** {P.choices_str()}\n"
-                f"**Example:** `!register cf tourist`"
-            )
+            embed = discord.Embed(title="📝  Register Handle  —  Usage", color=COLOR_INFO)
+            embed.add_field(name="Command",   value="`!register <platform> <handle>`", inline=False)
+            embed.add_field(name="Example",   value="`!register cf tourist`",          inline=False)
+            embed.add_field(name="Platforms", value=P.choices_str(),                   inline=False)
+            await ctx.send(embed=embed)
             return
 
         adapter = P.get(platform)
         if not adapter:
-            await ctx.send(
-                f"❌ Unknown platform `{platform}`.\n"
-                f"Supported: {P.choices_str()}"
-            )
+            await ctx.send(f"❌  Unknown platform `{platform}`. Supported: {P.choices_str()}")
             return
 
-        msg = await ctx.send(f"🔍 Verifying `{handle}` on {adapter.NAME}...")
+        msg = await ctx.send(f"🔍  Verifying `{handle}` on **{adapter.NAME}**…")
         valid, status = await adapter.verify_handle(handle)
 
         if not valid:
@@ -55,71 +51,87 @@ class Registry(commands.Cog):
             await q.upsert_user(conn, str(ctx.author.id), ctx.author.name)
             await q.set_handle(conn, str(ctx.author.id), adapter.KEY, handle)
 
-        embed = discord.Embed(title="✅ Handle Registered", color=COLOR_SUCCESS)
-        embed.add_field(name="Discord",   value=ctx.author.mention, inline=True)
-        embed.add_field(name="Platform",  value=adapter.NAME,       inline=True)
-        embed.add_field(name="Handle",    value=f"`{handle}`",       inline=True)
+        pemoji = PLATFORM_ICONS.get(adapter.KEY, "⚪")
+        embed = discord.Embed(title="✅  Handle Registered", color=COLOR_SUCCESS)
+        embed.set_thumbnail(url=ctx.author.display_avatar.url)
+        embed.add_field(name="Member",   value=ctx.author.mention, inline=True)
+        embed.add_field(name="Platform", value=f"{pemoji}  {adapter.NAME}", inline=True)
+        embed.add_field(name="Handle",   value=f"`{handle}`",        inline=True)
         embed.set_footer(text=status.replace("✅ ", ""))
         await msg.edit(content=None, embed=embed)
 
-    # ── !unregister ────────────────────────────────────────────────────────
-
     @commands.command(name="unregister")
     async def unregister(self, ctx, platform: str = None):
-        """Remove a linked platform handle.  !unregister cf"""
+        """/unregister cf"""
         if not platform or not P.get(platform):
-            await ctx.send(f"Usage: `!unregister <platform>`  |  Supported: {P.choices_str()}")
+            await ctx.send(f"Usage: `!unregister <platform>`  ·  Supported: {P.choices_str()}")
             return
 
         adapter = P.get(platform)
-        pool = get_pool()
+        pool    = get_pool()
         async with pool.acquire() as conn:
             handle = await q.get_handle(conn, str(ctx.author.id), adapter.KEY)
             if not handle:
-                await ctx.send(f"❌ You don't have a `{platform}` handle registered.")
+                await ctx.send(f"❌  No `{platform}` handle registered.")
                 return
             await q.delete_handle(conn, str(ctx.author.id), adapter.KEY)
 
-        await ctx.send(f"✅ Unlinked your {adapter.NAME} handle (`{handle}`).")
-
-    # ── !profile ───────────────────────────────────────────────────────────
+        pemoji = PLATFORM_ICONS.get(adapter.KEY, "⚪")
+        await ctx.send(f"✅  Unlinked {pemoji} **{adapter.NAME}** handle `{handle}`.")
 
     @commands.command(name="profile")
     async def profile(self, ctx, member: discord.Member = None):
-        """View linked handles and stats.  !profile [@user]"""
+        """/profile [@user]"""
         target = member or ctx.author
         pool   = get_pool()
 
         async with pool.acquire() as conn:
-            handles = await q.get_user_handles(conn, str(target.id))
-            solves  = await q.get_user_solves(conn, str(target.id), str(ctx.guild.id))
+            handles     = await q.get_user_handles(conn, str(target.id))
+            solves      = await q.get_user_solves(conn, str(target.id), str(ctx.guild.id))
+            adj_total   = await q.get_user_adjustment_total(conn, str(ctx.guild.id), str(target.id))
+
+        solve_pts   = sum(s["points_awarded"] for s in solves)
+        total_pts   = solve_pts + adj_total
+        today       = q.today_ist()
+        today_pts   = sum(
+            s["points_awarded"] for s in solves
+            if hasattr(s["assigned_date"], "year") and s["assigned_date"] == today
+        )
 
         embed = discord.Embed(
-            title=f"👤 {target.display_name}",
+            title=f"👤  {target.display_name}",
             color=COLOR_INFO,
         )
         embed.set_thumbnail(url=target.display_avatar.url)
 
+        # Linked handles
         if handles:
-            platform_names = P.names()
             handle_lines = "\n".join(
-                f"**{platform_names.get(h['platform'], h['platform'])}:** `{h['handle']}`"
+                f"{PLATFORM_ICONS.get(h['platform'], '⚪')}  **{P.names().get(h['platform'], h['platform'])}:** `{h['handle']}`"
                 for h in handles
             )
-            embed.add_field(name="Linked Accounts", value=handle_lines, inline=False)
         else:
-            embed.add_field(name="Linked Accounts", value="None — use `!register`", inline=False)
+            handle_lines = "*None — use `!register`*"
+        embed.add_field(name="🔗  Linked Accounts", value=handle_lines, inline=False)
 
-        total_pts = sum(s["points_awarded"] for s in solves)
-        embed.add_field(name="Problems Solved",  value=str(len(solves)), inline=True)
-        embed.add_field(name="Total Points",     value=str(total_pts),   inline=True)
+        # Stats
+        embed.add_field(name="🏅  Total Points",  value=f"**{total_pts}**",       inline=True)
+        embed.add_field(name="✅  Solved",         value=f"**{len(solves)}**",     inline=True)
+        embed.add_field(name="☀️  Today",          value=f"**{today_pts} pts**",   inline=True)
+
+        if adj_total != 0:
+            embed.add_field(
+                name="🎛️  Manual Adjustments",
+                value=f"`{adj_total:+d} pts`",
+                inline=False,
+            )
+
+        embed.set_footer(text=f"Solve pts: {solve_pts}  ·  Adjustments: {adj_total:+d}")
         await ctx.send(embed=embed)
-
-    # ── !handles ───────────────────────────────────────────────────────────
 
     @commands.command(name="handles")
     async def handles(self, ctx, platform: str = None):
-        """List all registered members, optionally filtered by platform."""
+        """/handles [platform]"""
         pool = get_pool()
         async with pool.acquire() as conn:
             if platform:
@@ -127,12 +139,10 @@ class Registry(commands.Cog):
                 if not adapter:
                     await ctx.send(f"Unknown platform `{platform}`.")
                     return
-                rows = await q.get_all_handles_for_platform(conn, adapter.KEY)
-                title = f"Registered {adapter.NAME} Handles"
+                rows  = await q.get_all_handles_for_platform(conn, adapter.KEY)
+                title = f"{PLATFORM_ICONS.get(adapter.KEY, '⚪')}  {adapter.NAME} Handles"
             else:
-                # All platforms
-                rows  = []
-                title = "All Registered Handles"
+                rows, title = [], "📋  All Registered Handles"
                 for key in P.keys():
                     for r in await q.get_all_handles_for_platform(conn, key):
                         rows.append({**dict(r), "platform": key})
@@ -144,17 +154,14 @@ class Registry(commands.Cog):
         lines = []
         for row in rows:
             member = ctx.guild.get_member(int(row["discord_id"]))
-            name   = member.display_name if member else f"<Unknown>"
-            plat   = P.names().get(row.get("platform", ""), row.get("platform", ""))
-            lines.append(f"**{name}** — `{row['handle']}` ({plat})")
+            name   = f"**{member.display_name}**" if member else "*Left server*"
+            pemoji = PLATFORM_ICONS.get(row.get("platform", ""), "⚪")
+            pname  = P.names().get(row.get("platform", ""), "")
+            lines.append(f"{pemoji}  {name} — `{row['handle']}`  *({pname})*")
 
-        embed = discord.Embed(
-            title=f"📋 {title}",
-            description="\n".join(lines[:25]),
-            color=COLOR_INFO,
-        )
+        embed = discord.Embed(title=title, description="\n".join(lines[:25]), color=COLOR_INFO)
         if len(lines) > 25:
-            embed.set_footer(text=f"+{len(lines)-25} more")
+            embed.set_footer(text=f"+{len(lines)-25} more  ·  {len(lines)} total")
         await ctx.send(embed=embed)
 
 

@@ -1,6 +1,5 @@
 """
 config.py — All environment variables and bot-wide constants.
-Set these in a .env file locally or in Render's environment settings.
 """
 
 import os
@@ -11,16 +10,21 @@ load_dotenv()
 # ── Discord ───────────────────────────────────────────────────────────────────
 DISCORD_TOKEN   = os.getenv("DISCORD_TOKEN", "")
 PREFIX          = os.getenv("PREFIX", "!")
-ADMIN_ROLE      = os.getenv("ADMIN_ROLE", "Admin")       # Role name for admin commands
+ADMIN_ROLE      = os.getenv("ADMIN_ROLE", "Admin")
 
 # ── Database (Supabase PostgreSQL) ────────────────────────────────────────────
-DATABASE_URL    = os.getenv("DATABASE_URL", "")          # postgres://user:pass@host:5432/db
+DATABASE_URL    = os.getenv("DATABASE_URL", "")
 
 # ── Render keep-alive ─────────────────────────────────────────────────────────
-RENDER_URL      = os.getenv("RENDER_URL", "")            # https://your-bot.onrender.com
-PORT            = int(os.getenv("PORT", 10000))          # Render sets this automatically
+RENDER_URL      = os.getenv("RENDER_URL", "")
+PORT            = int(os.getenv("PORT", 10000))
 
-# ── Default difficulty → points mapping (admins can override per guild) ───────
+# ── Timezone (IST = UTC+5:30) ─────────────────────────────────────────────────
+# All "day" boundaries are midnight IST
+IST_OFFSET_HOURS = 5
+IST_OFFSET_MINS  = 30
+
+# ── Default difficulty → points mapping ───────────────────────────────────────
 DEFAULT_DIFFICULTY_POINTS: dict[str, int] = {
     "easy":   5,
     "medium": 10,
@@ -34,3 +38,5 @@ COLOR_SUCCESS = 0x57F287   # green
 COLOR_ERROR   = 0xED4245   # red
 COLOR_INFO    = 0x5865F2   # blurple
 COLOR_WARN    = 0xFEE75C   # yellow
+COLOR_GOLD    = 0xFFD700   # gold
+COLOR_PURPLE  = 0x9B59B6   # purple (monthly)

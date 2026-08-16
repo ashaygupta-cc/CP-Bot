@@ -1,20 +1,20 @@
 services:
-  - type: web                     # "web" exposes a public URL (needed for /health keep-alive)
+  - type: web
     name: cp-discord-bot
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
-    healthCheckPath: /health      # Render pings this to confirm the service is up
+    healthCheckPath: /health
     envVars:
       - key: DISCORD_TOKEN
-        sync: false               # Set manually in Render dashboard — never commit this
+        sync: false
       - key: DATABASE_URL
-        sync: false               # Supabase postgres:// connection string
+        sync: false
       - key: RENDER_URL
-        sync: false               # https://cp-discord-bot.onrender.com (set after first deploy)
+        sync: false
       - key: PREFIX
         value: "!"
       - key: ADMIN_ROLE
         value: "Admin"
       - key: PORT
-        value: "10000"            # Render sets this automatically; explicitly listed for clarity
+        value: "10000"

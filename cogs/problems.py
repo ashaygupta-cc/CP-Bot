@@ -1,6 +1,7 @@
 """
 cogs/problems.py
-Commands: !addproblem, !removeproblem, !problems, !setdifficulty
+Commands: /addproblem, /removeproblem, /problems, /setdifficulty
+v2: assigned_date required, /removeproblem keeps solve history by default
 """
 
 import discord
@@ -10,6 +11,9 @@ from database.connection import get_pool
 from database import queries as q
 import platforms as P
 from config import COLOR_SUCCESS, COLOR_ERROR, COLOR_INFO, COLOR_WARN, ADMIN_ROLE
+
+PLATFORM_EMOJIS = {"cf": "🔵", "lc": "🟡", "cc": "🟤", "atcoder": "🔴"}
+DIFF_EMOJIS     = {"easy": "🟢", "medium": "🟡", "hard": "🔴", "expert": "🟣", "master": "⚫"}
 
 
 def is_admin():
@@ -21,35 +25,29 @@ def is_admin():
     return commands.check(predicate)
 
 
-PLATFORM_EMOJIS = {"cf": "🔵", "lc": "🟡", "cc": "🟤", "atcoder": "🔴"}
-
-
 class Problems(commands.Cog):
     """Manage the problems assigned each week."""
 
     def __init__(self, bot):
         self.bot = bot
 
-    # ── !addproblem ────────────────────────────────────────────────────────
+    # ── /addproblem ─────────────────────────────────────────────────────────
 
     @commands.command(name="addproblem")
     @is_admin()
     async def add_problem(self, ctx, platform: str = None, problem_id: str = None,
-                          difficulty: str = None, custom_points: int = None):
+                          difficulty: str = None, assigned_date: str = None,
+                          custom_points: int = None):
         """
-        Add a problem to the current week.
-        !addproblem cf 1234A hard
-        !addproblem lc two-sum easy 7          ← custom points override
-        !addproblem atcoder abc123_a medium
-
-        If custom_points is omitted, points come from !setpoints config.
+        Add a problem to the current week for a specific date.
+        /addproblem cf 1234A hard 2026-06-26
+        /addproblem lc two-sum easy 2026-06-27 7
         """
-        if not platform or not problem_id or not difficulty:
+        if not platform or not problem_id or not difficulty or not assigned_date:
             await ctx.send(
-                "**Usage:** `!addproblem <platform> <problem_id> <difficulty> [custom_points]`\n"
-                "**Example (CF):** `!addproblem cf 1234A hard`\n"
-                "**Example (LC):** `!addproblem lc two-sum medium`\n"
-                "**Example (AC):** `!addproblem atcoder abc123_a easy`\n"
+                "**Usage:** `!addproblem <platform> <problem_id> <difficulty> <YYYY-MM-DD> [custom_points]`\n"
+                "**Example:** `!addproblem cf 1234A hard 2026-06-26`\n"
+                "**Example:** `!addproblem lc two-sum easy 2026-06-27 7`\n"
                 f"**Platforms:** {P.choices_str()}"
             )
             return
@@ -59,12 +57,23 @@ class Problems(commands.Cog):
             await ctx.send(f"❌ Unknown platform `{platform}`. Supported: {P.choices_str()}")
             return
 
+        try:
+            a_date = date.fromisoformat(assigned_date)
+        except ValueError:
+            await ctx.send("❌ Date must be `YYYY-MM-DD`, e.g. `2026-06-26`.")
+            return
+
         pool = get_pool()
         async with pool.acquire() as conn:
             week = await q.get_active_week(conn, str(ctx.guild.id))
             if not week:
+                await ctx.send("❌ No active week. Create one with `!setweek \"Week 1\" YYYY-MM-DD YYYY-MM-DD`.")
+                return
+
+            if not (week["start_date"] <= a_date <= week["end_date"]):
                 await ctx.send(
-                    "❌ No active week. Create one first with `!setweek \"Week 1\" YYYY-MM-DD YYYY-MM-DD`."
+                    f"❌ Date `{a_date}` is outside the active week "
+                    f"(`{week['start_date']}` → `{week['end_date']}`)."
                 )
                 return
 
@@ -75,47 +84,63 @@ class Problems(commands.Cog):
                 cfg    = await q.get_difficulty_points(conn, str(ctx.guild.id))
                 points = cfg.get(difficulty.lower())
                 if points is None:
-                    difficulties = ", ".join(f"`{d}`" for d in cfg)
-                    await ctx.send(
-                        f"❌ Unknown difficulty `{difficulty}`. "
-                        f"Available: {difficulties}\n"
-                        f"Or set a custom one with `!setpoints {difficulty} <pts>`."
-                    )
+                    diffs = ", ".join(f"`{d}`" for d in cfg)
+                    await ctx.send(f"❌ Unknown difficulty `{difficulty}`. Available: {diffs}")
                     return
+
+            # Get active month too
+            month = await q.get_active_month(conn, str(ctx.guild.id))
+            month_id = month["id"] if month else None
 
             pid = adapter.format_problem_id(problem_id)
             prob_db_id = await q.add_problem(
                 conn,
                 guild_id      = str(ctx.guild.id),
                 week_id       = week["id"],
+                month_id      = month_id,
                 platform      = adapter.KEY,
                 problem_id    = pid,
                 title         = None,
                 difficulty    = difficulty.lower(),
                 points        = points,
                 set_by        = str(ctx.author.id),
+                assigned_date = a_date,
             )
 
-        url = adapter.problem_url(pid)
-        embed = discord.Embed(title="📌 Problem Added", color=COLOR_SUCCESS)
-        embed.add_field(name="Platform",    value=adapter.NAME,            inline=True)
-        embed.add_field(name="Problem ID",  value=f"`{pid}`",              inline=True)
-        embed.add_field(name="Difficulty",  value=difficulty.capitalize(), inline=True)
-        embed.add_field(name="Points",      value=f"{points} pts",         inline=True)
-        embed.add_field(name="Week",        value=week["label"],           inline=True)
-        embed.add_field(name="DB ID",       value=f"#{prob_db_id}",        inline=True)
+        url   = adapter.problem_url(pid)
+        demoji = DIFF_EMOJIS.get(difficulty.lower(), "⚪")
+        pemoji = PLATFORM_EMOJIS.get(adapter.KEY, "⚪")
+
+        embed = discord.Embed(
+            title=f"{pemoji} Problem Added to {week['label']}",
+            color=COLOR_SUCCESS
+        )
+        embed.add_field(name="Platform",   value=adapter.NAME,                        inline=True)
+        embed.add_field(name="Problem ID", value=f"`{pid}`",                          inline=True)
+        embed.add_field(name="Difficulty", value=f"{demoji} {difficulty.capitalize()}", inline=True)
+        embed.add_field(name="Points",     value=f"**{points} pts**",                 inline=True)
+        embed.add_field(name="Day",        value=f"`{a_date}`",                       inline=True)
+        embed.add_field(name="DB ID",      value=f"#{prob_db_id}",                    inline=True)
         if url:
-            embed.add_field(name="Link", value=f"[Open Problem]({url})", inline=False)
+            embed.add_field(name="🔗 Link", value=f"[Open Problem]({url})", inline=False)
+        embed.set_footer(text=f"Added by {ctx.author.display_name}")
         await ctx.send(embed=embed)
 
-    # ── !removeproblem ─────────────────────────────────────────────────────
+    # ── /removeproblem ──────────────────────────────────────────────────────
 
     @commands.command(name="removeproblem")
     @is_admin()
-    async def remove_problem(self, ctx, problem_db_id: int = None):
-        """Remove a problem by its DB ID.  !removeproblem 42"""
+    async def remove_problem(self, ctx, problem_db_id: int = None, keep_history: str = "yes"):
+        """
+        Remove a problem. Solve history kept by default.
+        /removeproblem 42           — keeps past solves
+        /removeproblem 42 no        — deletes solves too (points gone)
+        """
         if problem_db_id is None:
-            await ctx.send("Usage: `!removeproblem <db_id>`  (find ID with `!problems`)")
+            await ctx.send(
+                "**Usage:** `!removeproblem <db_id> [keep_history: yes/no]`\n"
+                "Default keeps solve history. Use `no` to also delete recorded solves."
+            )
             return
 
         pool = get_pool()
@@ -124,17 +149,31 @@ class Problems(commands.Cog):
             if not prob or prob["guild_id"] != str(ctx.guild.id):
                 await ctx.send(f"❌ Problem `#{problem_db_id}` not found in this server.")
                 return
-            await q.remove_problem(conn, problem_db_id, str(ctx.guild.id))
 
-        await ctx.send(
-            f"✅ Removed **{prob['platform'].upper()} `{prob['problem_id']}`** (#{problem_db_id})."
+            if keep_history.lower() in ("no", "false", "0"):
+                await q.hard_remove_problem(conn, problem_db_id, str(ctx.guild.id))
+                note = "Solve records also deleted."
+            else:
+                await q.remove_problem_keep_solves(conn, problem_db_id, str(ctx.guild.id))
+                note = "Past solve records kept (points preserved)."
+
+        pemoji = PLATFORM_EMOJIS.get(prob["platform"], "⚪")
+        embed = discord.Embed(
+            title=f"{pemoji} Problem Removed",
+            description=(
+                f"`{prob['platform'].upper()} {prob['problem_id']}` (#{problem_db_id}) removed.\n"
+                f"*{note}*"
+            ),
+            color=COLOR_WARN,
         )
+        embed.set_footer(text=f"By {ctx.author.display_name}")
+        await ctx.send(embed=embed)
 
-    # ── !problems ──────────────────────────────────────────────────────────
+    # ── /problems ───────────────────────────────────────────────────────────
 
-    @commands.command(name="problems", aliases=["week"])
+    @commands.command(name="problems")
     async def list_problems(self, ctx):
-        """Show all problems for the current week."""
+        """Show all problems for the current week, grouped by day."""
         pool = get_pool()
         async with pool.acquire() as conn:
             week = await q.get_active_week(conn, str(ctx.guild.id))
@@ -144,54 +183,59 @@ class Problems(commands.Cog):
             probs = await q.get_problems_for_week(conn, str(ctx.guild.id), week["id"])
 
         embed = discord.Embed(
-            title=f"📋 Problems — {week['label']}",
-            description=(
-                f"📅 **{week['start_date']}** → **{week['end_date']}**\n"
-                f"{len(probs)} problem(s) assigned"
-            ),
+            title=f"📋  {week['label']}  —  Problem Set",
+            description=f"📅  `{week['start_date']}` → `{week['end_date']}`",
             color=COLOR_INFO,
         )
+        embed.set_author(name=ctx.guild.name, icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
 
         if not probs:
             embed.add_field(
                 name="No problems yet",
-                value="Admins can add with `!addproblem <platform> <problem_id> <difficulty>`",
+                value="Admins: `!addproblem <platform> <id> <difficulty> <YYYY-MM-DD>`",
                 inline=False,
             )
         else:
-            for prob in probs:
-                adapter = P.get(prob["platform"])
-                emoji   = PLATFORM_EMOJIS.get(prob["platform"], "⚪")
-                name    = adapter.NAME if adapter else prob["platform"]
-                url     = adapter.problem_url(prob["problem_id"]) if adapter else None
-                link    = f"[Link]({url})" if url else "N/A"
+            # Group by day
+            by_day: dict[date, list] = {}
+            for p in probs:
+                by_day.setdefault(p["assigned_date"], []).append(p)
 
-                embed.add_field(
-                    name=f"{emoji} {name} `{prob['problem_id']}`  (#{prob['id']})",
-                    value=(
-                        f"**Difficulty:** {prob['difficulty'].capitalize()}  "
-                        f"**Points:** {prob['points']} pts  "
-                        f"{link}"
-                    ),
-                    inline=False,
-                )
+            today = q.today_ist()
+            for day, day_probs in sorted(by_day.items()):
+                day_label = day.strftime("%A, %d %b")
+                if day == today:
+                    day_label = f"📍 TODAY — {day_label}"
+                elif day < today:
+                    day_label = f"✅ {day_label} (past)"
+                else:
+                    day_label = f"🔜 {day_label}"
 
+                lines = []
+                for prob in day_probs:
+                    adapter = P.get(prob["platform"])
+                    pemoji  = PLATFORM_EMOJIS.get(prob["platform"], "⚪")
+                    demoji  = DIFF_EMOJIS.get(prob["difficulty"], "⚪")
+                    url     = adapter.problem_url(prob["problem_id"]) if adapter else None
+                    link    = f"[{prob['problem_id']}]({url})" if url else f"`{prob['problem_id']}`"
+                    lines.append(
+                        f"{pemoji} **{link}**  {demoji} {prob['difficulty'].capitalize()}  "
+                        f"·  **{prob['points']} pts**  ·  `#{prob['id']}`"
+                    )
+
+                embed.add_field(name=day_label, value="\n".join(lines), inline=False)
+
+        embed.set_footer(text=f"{len(probs)} problem(s) total  ·  /check to verify solves")
         await ctx.send(embed=embed)
 
-    # ── !setdifficulty ─────────────────────────────────────────────────────
+    # ── /setdifficulty ──────────────────────────────────────────────────────
 
     @commands.command(name="setdifficulty")
     @is_admin()
     async def set_difficulty(self, ctx, problem_db_id: int = None, difficulty: str = None):
-        """
-        Change difficulty (and recalculate points) for a problem.
-        !setdifficulty 42 hard
-        """
+        """Change difficulty (and recalculate points) for a problem. /setdifficulty 42 hard"""
         if problem_db_id is None or difficulty is None:
-            await ctx.send(
-                "Usage: `!setdifficulty <db_id> <difficulty>`\n"
-                "Example: `!setdifficulty 42 hard`"
-            )
+            await ctx.send("Usage: `!setdifficulty <db_id> <difficulty>`")
             return
 
         pool = get_pool()
@@ -209,12 +253,10 @@ class Problems(commands.Cog):
 
             await q.set_problem_difficulty(conn, problem_db_id, difficulty, points)
 
+        demoji = DIFF_EMOJIS.get(difficulty.lower(), "⚪")
         await ctx.send(
-            f"✅ Problem `#{problem_db_id}` updated: "
-            f"**{difficulty.capitalize()}** → **{points} pts**."
+            f"✅ Problem `#{problem_db_id}` → {demoji} **{difficulty.capitalize()}** · **{points} pts**"
         )
-
-    # ── Error handler ──────────────────────────────────────────────────────
 
     @add_problem.error
     @remove_problem.error

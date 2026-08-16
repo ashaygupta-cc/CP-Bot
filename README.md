@@ -1,8 +1,6 @@
-# 🤖 CP Discord Bot
+# 🤖 CP Discord Bot  v2
 
-A fully featured **Competitive Programming Discord Bot** that tracks weekly problem assignments,
-verifies solves across Codeforces, LeetCode, CodeChef, and AtCoder, and maintains leaderboards.
-Backend hosted on **Render**, database on **Supabase**, keep-alive cron on **Vercel**.
+Competitive Programming tracker with **Daily / Weekly / Monthly leaderboards**, day-locked scoring, manual point management, and a fully professional embed UI.
 
 ---
 
@@ -10,160 +8,101 @@ Backend hosted on **Render**, database on **Supabase**, keep-alive cron on **Ver
 
 ```
 cp-bot/
-├── bot.py                  ← Entry point
-├── config.py               ← All env vars and constants
-├── keep_alive.py           ← Aiohttp /health server (Render keep-alive)
-├── ping.py                 ← Local ping script (alternative to Vercel cron)
-├── render.yaml             ← Render deployment config
+├── bot.py                     ← Entry point  (prefix: /)
+├── config.py                  ← Env vars, colours, timezone (IST)
+├── keep_alive.py              ← Aiohttp /health server
+├── ping.py                    ← Local keep-alive script
+├── render.yaml                ← Render deploy config
 ├── requirements.txt
-├── .env.example            ← Copy to .env and fill in values
+├── .env.example
 │
 ├── cogs/
-│   ├── admin.py            ← !setweek, !currentweek, !setpoints, !points
-│   ├── checker.py          ← !check, !checkall + auto-check every 6h
-│   ├── leaderboard.py      ← !leaderboard [all]
-│   ├── problems.py         ← !addproblem, !removeproblem, !problems, !setdifficulty
-│   ├── registry.py         ← !register, !unregister, !profile, !handles
-│   ├── reset.py            ← !resetweek, !resetalltime, !resetuser, !resetproblem, !resetweekfull
-│   └── submissions.py      ← !submissions
+│   ├── admin.py               ← /setweek /setmonth /currentweek /setpoints /points
+│   ├── checker.py             ← /check /checkall + auto-check every 6h
+│   ├── leaderboard.py         ← /leaderboard  (daily + weekly + monthly)
+│   ├── points.py  ★ NEW       ← /addpoints /subpoints /setmemberpoints /pointlog
+│   ├── problems.py            ← /addproblem /removeproblem /problems /setdifficulty
+│   ├── registry.py            ← /register /unregister /profile /handles
+│   ├── reset.py               ← /resetdaily /resetweek /resetmonth /resetalltime …
+│   └── submissions.py         ← /submissions
 │
 ├── database/
-│   ├── connection.py       ← asyncpg pool
-│   ├── queries.py          ← All SQL (including reset queries)
-│   └── schema.sql          ← Run once in Supabase SQL editor
+│   ├── connection.py          ← asyncpg pool
+│   ├── queries.py             ← All SQL (day windows, leaderboards, adjustments)
+│   └── schema.sql             ← Run once in Supabase SQL editor
 │
 └── platforms/
-    ├── __init__.py         ← Platform registry
-    ├── base.py             ← Abstract PlatformAdapter
-    ├── atcoder.py
-    ├── codechef.py
-    ├── codeforces.py
-    └── leetcode.py
+    ├── __init__.py
+    ├── base.py
+    ├── atcoder.py  codeforces.py  codechef.py  leetcode.py
 ```
 
 ---
 
-## 🗄️ Step 1 — Supabase Database Setup
+## ⚡ Key Changes from v1
 
-1. Go to https://supabase.com and create a free project.
-2. In your project, go to **SQL Editor → New Query**.
-3. Paste the entire contents of `database/schema.sql` and click **Run**.
-4. Go to **Settings → Database → Connection string → URI**.
-   - Use the **Transaction pooler** URI (port `6543`), not the direct connection.
-   - It looks like:
-     ```
-     postgresql://postgres.xxxx:YOUR_PASSWORD@aws-0-ap-south-1.pooler.supabase.com:6543/postgres
-     ```
-5. Copy this URI — you'll need it as `DATABASE_URL`.
+| Feature | v1 | v2 |
+|---------|----|----|
+| Prefix | `!` | `/` |
+| Leaderboard | weekly only | **Daily + Weekly + Monthly** |
+| Day locking | ❌ Points any time in week | ✅ Points only on assigned day (midnight–midnight IST) |
+| Remove problem | Deletes solve history | `/removeproblem 42` keeps history by default |
+| Manual points | ❌ | ✅ `/addpoints` `/subpoints` `/setmemberpoints` |
+| Monthly tracking | ❌ | ✅ `/setmonth` links problems to month |
+| Reset scope | One command | `/resetdaily` `/resetweek` `/resetmonth` (scoped) |
+| Embed style | Basic | Professional with thumbnails, icons, medals |
 
 ---
 
-## 🤖 Step 2 — Discord Bot Setup
+## 🗄️ Step 1 — Supabase Setup
 
-1. Go to https://discord.com/developers/applications → **New Application**.
-2. Go to **Bot** tab → **Add Bot** → copy the **Token** (this is `DISCORD_TOKEN`).
-3. Under **Privileged Gateway Intents**, enable:
-   - ✅ **Server Members Intent**
-   - ✅ **Message Content Intent**
-4. Go to **OAuth2 → URL Generator**:
-   - Scopes: `bot`
-   - Bot Permissions: `Send Messages`, `Embed Links`, `Read Message History`, `View Channels`
-5. Copy the generated URL and open it to invite the bot to your server.
+1. Go to https://supabase.com → create a free project.
+2. **SQL Editor → New Query** → paste `database/schema.sql` → **Run**.
+3. **Settings → Database → Connection string → URI → Transaction pooler** (port 6543).
+4. Copy the URI — this is your `DATABASE_URL`.
+
+> **Upgrading from v1?** The new schema adds `months`, `point_adjustments` tables, and makes `assigned_date` required in `problems`. Run the full schema — `CREATE TABLE IF NOT EXISTS` is safe to re-run.
+
+---
+
+## 🤖 Step 2 — Discord Bot
+
+1. https://discord.com/developers/applications → **New Application → Bot**.
+2. Copy **Token** (`DISCORD_TOKEN`).
+3. Enable **Privileged Intents**: Server Members + Message Content.
+4. **OAuth2 → URL Generator** → Scopes: `bot` → Permissions: `Send Messages`, `Embed Links`, `Read Message History`, `View Channels` → invite to your server.
 
 ---
 
 ## 🚀 Step 3 — Deploy to Render
 
-1. Push this project to a GitHub repository:
-   ```bash
-   git init
-   git add .
-   git commit -m "initial"
-   gh repo create cp-discord-bot --private --push
-   ```
+```bash
+git init && git add . && git commit -m "v2 init"
+gh repo create cp-discord-bot --private --push
+```
 
-2. Go to https://render.com → **New → Web Service**.
-3. Connect your GitHub repo.
-4. Render will auto-detect `render.yaml`. Confirm these settings:
-   - **Environment:** Python
-   - **Build Command:** `pip install -r requirements.txt`
-   - **Start Command:** `python bot.py`
+1. https://render.com → **New → Web Service** → connect repo.
+2. Render auto-reads `render.yaml`.
+3. **Environment Variables** in Render dashboard:
 
-5. Add **Environment Variables** in the Render dashboard:
+| Key | Value |
+|-----|-------|
+| `DISCORD_TOKEN` | from Step 2 |
+| `DATABASE_URL` | Supabase pooler URI |
+| `RENDER_URL` | `https://your-bot.onrender.com` (set after first deploy) |
+| `PREFIX` | `/` |
+| `ADMIN_ROLE` | `Admin` (your role name) |
 
-   | Key              | Value                                                      |
-   |------------------|------------------------------------------------------------|
-   | `DISCORD_TOKEN`  | Your bot token from Step 2                                 |
-   | `DATABASE_URL`   | Supabase transaction pooler URI from Step 1                |
-   | `RENDER_URL`     | Your Render service URL (e.g. `https://cp-bot.onrender.com`) — set AFTER first deploy |
-   | `PREFIX`         | `!` (or whatever prefix you want)                          |
-   | `ADMIN_ROLE`     | `Admin` (or your server's admin role name)                 |
-
-6. Click **Deploy**. Watch the logs — you should see:
-   ```
-   🔌 Connecting to database...
-   ✅ Database connected.
-      ✓ Loaded cogs.registry
-      ✓ Loaded cogs.admin
-      ...
-   ✅ Logged in as YourBot#1234 (ID: 123456789)
-   🌐 Health server listening on port 10000
-   ```
-
-7. Copy your Render service URL and add it as `RENDER_URL` in environment variables.
+4. Deploy → watch logs for `✅ Logged in as …`
 
 ---
 
-## ⏰ Step 4 — Keep-Alive Cron Job
+## ⏰ Step 4 — Keep-Alive (cron-job.org — free)
 
-Render free tier sleeps after 15 minutes of inactivity. The bot has a built-in `/health`
-endpoint. You need an external service to ping it every 10 minutes.
-
-### Option A — Vercel Cron (requires Vercel Pro for every 10 min)
-
-Use the separate `cp-bot-keepalive/` project (see its own README).
-
-### Option B — cron-job.org (100% free, recommended)
-
-1. Sign up at https://cron-job.org (free).
-2. Click **Create Cron Job**:
-   - **Title:** CP Bot Keep-Alive
+1. https://cron-job.org → Create cron job:
    - **URL:** `https://your-bot-name.onrender.com/health`
    - **Schedule:** Every 10 minutes
-3. Save. Done. Your bot will never sleep again.
-
-### Option C — Run ping.py locally
-
-```bash
-# In your .env set RENDER_URL=https://your-bot-name.onrender.com
-python ping.py
-```
-
-This pings every 10 minutes while your machine is on.
-
----
-
-## 💻 Local Development
-
-```bash
-# 1. Clone and enter
-git clone https://github.com/you/cp-discord-bot.git
-cd cp-discord-bot
-
-# 2. Create virtual environment
-python3 -m venv venv
-source venv/bin/activate       # Windows: venv\Scripts\activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Set up environment
-cp .env.example .env
-# Edit .env with your DISCORD_TOKEN, DATABASE_URL
-
-# 5. Run the bot
-python bot.py
-```
+2. Done. Bot never sleeps.
 
 ---
 
@@ -172,50 +111,84 @@ python bot.py
 ### 👤 Registration
 | Command | Description |
 |---------|-------------|
-| `!register <platform> <handle>` | Link your CP handle (auto-verified) |
-| `!unregister <platform>` | Unlink a handle |
-| `!profile [@user]` | View linked handles and point totals |
-| `!handles [platform]` | List all registered members |
+| `/register <platform> <handle>` | Link CP handle (verified) |
+| `/unregister <platform>` | Unlink handle |
+| `/profile [@user]` | Stats + linked handles |
+| `/handles [platform]` | All registered members |
 
-### 📅 Problems (Admin)
+### 📅 Problems
 | Command | Description |
 |---------|-------------|
-| `!addproblem <plat> <id> <diff> [pts]` | Add a problem to current week |
-| `!removeproblem <db_id>` | Remove a problem |
-| `!problems` | List this week's problems |
-| `!setdifficulty <db_id> <diff>` | Change a problem's difficulty |
+| `/addproblem <plat> <id> <diff> <YYYY-MM-DD> [pts]` | Add problem to a specific day |
+| `/removeproblem <db_id> [keep_history]` | Remove problem (default: keeps solve history) |
+| `/problems` | This week's schedule grouped by day |
+| `/setdifficulty <db_id> <diff>` | Change difficulty |
 
 ### 🔍 Checking
 | Command | Description |
 |---------|-------------|
-| `!check [@user]` | Check your (or another's) solve status |
-| `!checkall` | Bulk-check all members *(admin)* |
-| `!submissions <plat> [count] [@user]` | View recent platform submissions |
+| `/check [@user]` | Check **today's** problems only |
+| `/checkall` | Bulk-check all members (admin) |
+| `/submissions <plat> [count] [@user]` | Recent platform submissions |
 
 ### 🏆 Leaderboard
 | Command | Description |
 |---------|-------------|
-| `!leaderboard` | This week's rankings |
-| `!leaderboard all` | All-time rankings |
+| `/leaderboard` | Shows Daily + Weekly + Monthly at once |
 
-### ⚙️ Admin Config
+**Reset schedule:**
+- Daily → resets at midnight IST every day
+- Weekly → resets with `/resetweek` after week end-date
+- Monthly → resets with `/resetmonth` after month end-date
+
+### ⚙️ Admin — Config
 | Command | Description |
 |---------|-------------|
-| `!setweek "Label" YYYY-MM-DD YYYY-MM-DD` | Create/activate a new week |
-| `!currentweek` | Show the active week |
-| `!setpoints <difficulty> <pts>` | Configure points per difficulty |
-| `!points` | Show difficulty → points table |
+| `/setweek "Label" YYYY-MM-DD YYYY-MM-DD` | Create/activate a week |
+| `/setmonth "Label" YYYY-MM-DD YYYY-MM-DD` | Create/activate a month |
+| `/currentweek` | Show active week + month |
+| `/setpoints <difficulty> <pts>` | Configure points per difficulty |
+| `/points` | Show difficulty → points table |
 
-### 🔄 Reset (Admin)
+### 🎛️ Admin — Manual Points
 | Command | Description |
 |---------|-------------|
-| `!resetweek` | Clear solves for current week (problems kept) |
-| `!resetweekfull` | Delete solves + problems + deactivate week |
-| `!resetalltime` | ☢️ Wipe ALL solves ever (requires exact confirmation phrase) |
-| `!resetuser @user [week\|all]` | Reset a specific member's solves |
-| `!resetproblem <db_id>` | Un-mark all solves for one problem |
+| `/addpoints @user <n> [reason]` | Add bonus points |
+| `/subpoints @user <n> [reason]` | Deduct points |
+| `/setmemberpoints @user <n> [reason]` | Force adjustment total to exact value |
+| `/pointlog [@user]` | View last 10 adjustments |
 
-### 🌐 Platforms
+### 🔄 Admin — Reset (scoped)
+| Command | Clears | Leaves intact |
+|---------|--------|---------------|
+| `/resetdaily` | Today's daily solves | Weekly + Monthly |
+| `/resetweek` | All weekly solves | Monthly |
+| `/resetmonth` | All monthly solves (incl. daily + weekly) | — |
+| `/resetalltime` | ☢️ Everything | — |
+| `/resetuser @user [week\|all]` | One member's solves | Others |
+| `/resetproblem <db_id>` | Solves for one problem | Everything else |
+| `/resetweekfull` | Solves + problems + deactivate week | — |
+
+---
+
+## 🧠 How Day Locking Works
+
+Every problem has an `assigned_date` (set when you run `/addproblem`).
+
+When `/check` runs:
+1. It fetches only **today's problems** (IST date).
+2. It checks if the member solved the problem **on or after midnight IST of that day**.
+3. If the problem was solved **before** or **after** that day — **no points awarded**.
+
+This means:
+- Solving a problem one day early → no points (not yet the right day)
+- Solving after midnight IST when the next day begins → no points for that problem
+- Solving exactly on the day → ✅ full points
+
+---
+
+## 🌐 Platforms
+
 | Key | Platform |
 |-----|----------|
 | `cf` | Codeforces |
@@ -225,41 +198,13 @@ python bot.py
 
 ---
 
-## 🔧 Adding a New Platform
-
-1. Create `platforms/myplatform.py`, subclass `PlatformAdapter`, implement:
-   - `verify_handle(handle)` → `(bool, str)`
-   - `get_recent_submissions(handle, limit)` → `list[Submission]`
-   - `check_solved(handle, problem_id, since_ts)` → `(bool, str)`
-2. Add it to `platforms/__init__.py`:
-   ```python
-   from platforms.myplatform import MyPlatformAdapter
-   ADAPTERS["mp"] = MyPlatformAdapter()
-   ```
-3. Done — all cogs pick it up automatically.
-
----
-
 ## 🛠️ Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| Bot doesn't start | Check `DISCORD_TOKEN` is correct and Message Content Intent is enabled |
-| Database error on startup | Check `DATABASE_URL` uses the **transaction pooler** (port 6543), not direct |
-| Commands don't work | Ensure the bot has `Send Messages` + `Read Message History` permissions |
-| `!register` fails | The platform API may be rate-limiting; wait and retry |
-| Bot sleeps on Render | Make sure cron-job.org or Vercel cron is pinging `/health` every ≤10 min |
-| Admin commands denied | Ensure your Discord role is named exactly as `ADMIN_ROLE` env var, or you have Administrator permission |
-
----
-
-## 📄 Environment Variables Reference
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `DISCORD_TOKEN` | ✅ | — | Bot token from Discord Developer Portal |
-| `DATABASE_URL` | ✅ | — | Supabase PostgreSQL transaction pooler URI |
-| `RENDER_URL` | ✅ | — | Your Render service URL (for keep-alive) |
-| `PREFIX` | ❌ | `!` | Bot command prefix |
-| `ADMIN_ROLE` | ❌ | `Admin` | Discord role name with admin privileges |
-| `PORT` | ❌ | `10000` | HTTP health server port (Render sets this automatically) |
+| Bot doesn't start | Check `DISCORD_TOKEN` and Message Content Intent |
+| DB error | Check `DATABASE_URL` uses pooler (port 6543) |
+| `/check` says "no problems today" | Problems must be added with today's date via `/addproblem` |
+| Monthly leaderboard empty | Run `/setmonth` first, then add problems (month must be active when problem is added) |
+| Admin commands denied | Role name must exactly match `ADMIN_ROLE` env var |
+| Bot sleeps on Render | Set up cron-job.org pinging `/health` every 10 min |

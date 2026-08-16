@@ -1,6 +1,7 @@
 """
-bot.py — Entry point.
-Starts the keep-alive HTTP server, connects to Supabase, loads all cogs, runs the bot.
+bot.py — Entry point (v2)
+Prefix changed to /  ·  Cogs: registry, admin, problems, checker,
+leaderboard, submissions, reset, points
 """
 
 import asyncio
@@ -11,7 +12,6 @@ import config
 from database.connection import init_pool, close_pool
 from keep_alive import run_server
 
-# ── Intents ───────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -26,14 +26,15 @@ COGS = [
     "cogs.leaderboard",
     "cogs.submissions",
     "cogs.reset",
+    "cogs.points",
 ]
 
-# ── Events ─────────────────────────────────────────────────────────────────────
 
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
-    print(f"   Servers: {len(bot.guilds)}")
+    print(f"✅  Logged in as {bot.user} (ID: {bot.user.id})")
+    print(f"    Prefix : {config.PREFIX}")
+    print(f"    Servers: {len(bot.guilds)}")
     print("─" * 40)
 
 
@@ -42,112 +43,125 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Missing argument: `{error.param.name}`. Use `!help {ctx.command}` for usage.")
+        await ctx.send(f"❌  Missing argument: `{error.param.name}`. Use `!help` for usage.")
         return
     if isinstance(error, commands.BadArgument):
-        await ctx.send(f"❌ Invalid argument. Use `!help {ctx.command}` for usage.")
+        await ctx.send(f"❌  Invalid argument. Use `!help` for usage.")
         return
-    # Re-raise unexpected errors
     raise error
 
 
-# ── !help ─────────────────────────────────────────────────────────────────────
+# ── /help ────────────────────────────────────────────────────────────────────
 
 @bot.command(name="help")
-async def help_cmd(ctx, command_name: str = None):
+async def help_cmd(ctx, section: str = None):
+    """Show all commands."""
+
     embed = discord.Embed(
-        title="📋 CP Practice Bot — Commands",
-        description="A competitive programming tracker with multi-platform support.",
+        title="📖  CP Practice Bot  —  Command Reference",
+        description=(
+            "*A competitive programming tracker with multi-platform support.*\n"
+            f"Prefix: `{config.PREFIX}`"
+        ),
         color=0x5865F2,
     )
+    embed.set_thumbnail(url=bot.user.display_avatar.url)
+
     embed.add_field(
-        name="👤 Registration",
+        name="👤  Registration",
         value=(
-            "`!register <platform> <handle>` — Link your CP handle (verified)\n"
+            "`!register <platform> <handle>` — Link your CP handle\n"
             "`!unregister <platform>` — Unlink a handle\n"
-            "`!profile [@user]` — View handles & points\n"
+            "`!profile [@user]` — View handles & point stats\n"
             "`!handles [platform]` — List all registered members"
         ),
         inline=False,
     )
     embed.add_field(
-        name="📅 Problems",
+        name="📅  Problems",
         value=(
-            "`!problems` — This week's problems\n"
-            "`!addproblem <plat> <id> <diff> [pts]` — Add problem *(admin)*\n"
-            "`!removeproblem <id>` — Remove a problem *(admin)*\n"
+            "`!problems` — This week's schedule (grouped by day)\n"
+            "`!addproblem <plat> <id> <diff> <date> [pts]` — Add problem *(admin)*\n"
+            "`!removeproblem <id> [keep_history]` — Remove problem *(admin)*\n"
             "`!setdifficulty <id> <diff>` — Change difficulty *(admin)*"
         ),
         inline=False,
     )
     embed.add_field(
-        name="🔍 Checking",
+        name="🔍  Solve Checking",
         value=(
-            "`!check [@user]` — Check solve status for this week\n"
+            "`!check [@user]` — Check today's problems\n"
             "`!checkall` — Bulk-check all members *(admin)*\n"
-            "`!submissions <plat> [count] [@user]` — View recent submissions"
+            "`!submissions <plat> [count] [@user]` — Recent submissions"
         ),
         inline=False,
     )
     embed.add_field(
-        name="🏆 Leaderboard",
+        name="🏆  Leaderboards",
         value=(
-            "`!leaderboard` — This week's rankings\n"
-            "`!leaderboard all` — All-time rankings"
+            "`!leaderboard` — Daily + Weekly + Monthly in one shot\n"
+            "*Daily resets midnight IST · Weekly resets on week end-date · Monthly on month end-date*"
         ),
         inline=False,
     )
     embed.add_field(
-        name="⚙️ Admin",
+        name="⚙️  Admin — Config",
         value=(
-            "`!setweek \"Label\" YYYY-MM-DD YYYY-MM-DD` — Create a new week\n"
-            "`!currentweek` — Show active week\n"
+            "`!setweek \"Label\" YYYY-MM-DD YYYY-MM-DD` — Create/activate a week\n"
+            "`!setmonth \"Label\" YYYY-MM-DD YYYY-MM-DD` — Create/activate a month\n"
+            "`!currentweek` — Show active week & month\n"
             "`!setpoints <difficulty> <pts>` — Configure points per difficulty\n"
-            "`!points` — Show current difficulty → points table"
+            "`!points` — Show difficulty → points table"
         ),
         inline=False,
     )
     embed.add_field(
-        name="🔄 Reset *(admin only)*",
+        name="🎛️  Admin — Manual Points",
         value=(
-            "`!resetweek` — Clear solves for current week (problems kept)\n"
-            "`!resetweekfull` — Delete solves + problems + deactivate week\n"
-            "`!resetalltime` — ☢️ Wipe ALL solves ever (nuclear)\n"
-            "`!resetuser @user [week|all]` — Reset a member's solves\n"
-            "`!resetproblem <db_id>` — Un-mark solves for one problem"
+            "`!addpoints @user <n> [reason]` — Add bonus points\n"
+            "`!subpoints @user <n> [reason]` — Deduct points\n"
+            "`!setmemberpoints @user <n> [reason]` — Force adjustment total\n"
+            "`!pointlog [@user]` — View recent adjustments"
         ),
         inline=False,
     )
     embed.add_field(
-        name="🌐 Platforms",
+        name="🔄  Admin — Reset",
+        value=(
+            "`!resetdaily` — Clear today's daily leaderboard only\n"
+            "`!resetweek` — Clear weekly (daily is a subset, also cleared)\n"
+            "`!resetmonth` — Clear monthly (daily + weekly also cleared)\n"
+            "`!resetalltime` — ☢️ Wipe everything\n"
+            "`!resetuser @user [week|all]` — Reset one member\n"
+            "`!resetproblem <db_id>` — Un-mark a problem's solves\n"
+            "`!resetweekfull` — Delete solves + problems + deactivate week"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🌐  Platforms",
         value="`cf` Codeforces · `lc` LeetCode · `cc` CodeChef · `atcoder` AtCoder",
         inline=False,
     )
-    embed.set_footer(text=f"Prefix: {config.PREFIX}  |  More platforms can be added easily.")
+    embed.set_footer(text="Points only awarded for problems solved on their assigned day (midnight–midnight IST)")
     await ctx.send(embed=embed)
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 async def main():
-    # 1. Start HTTP health server (keeps Render from sleeping)
     asyncio.create_task(run_server(config.PORT))
 
-    # 2. Connect to Supabase PostgreSQL
-    print("🔌 Connecting to database...")
+    print("🔌  Connecting to database…")
     await init_pool()
-    print("✅ Database connected.")
+    print("✅  Database connected.")
 
-    # 3. Load all cogs
     async with bot:
         for cog in COGS:
             await bot.load_extension(cog)
-            print(f"   ✓ Loaded {cog}")
-
-        # 4. Run the bot
+            print(f"   ✓  Loaded {cog}")
         await bot.start(config.DISCORD_TOKEN)
 
-    # Cleanup
     await close_pool()
 
 
