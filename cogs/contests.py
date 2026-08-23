@@ -55,6 +55,7 @@ PLATFORMS = {
     "lc":      {"name": "LeetCode",   "emoji": "🟡", "color": 0xFFA116},
     "cc":      {"name": "CodeChef",   "emoji": "🟤", "color": 0x6B3A2A},
     "atcoder": {"name": "AtCoder",    "emoji": "🔴", "color": 0xED4245},
+    "custom":  {"name": "Binary Beats", "emoji": "🟡", "color": 0xFEE75C},
 }
 
 # Reminder windows: (label, seconds_before_start, window_tolerance_seconds)
@@ -457,14 +458,14 @@ async def _fetch_atcoder(session: aiohttp.ClientSession) -> list[dict]:
             headers["Cookie"] = f"REVEL_SESSION={cookie_val}"
 
         async with session.get(
-            url, headers=headers, timeout=aiohttp.ClientTimeout(total=4)
+            url, headers=headers, timeout=aiohttp.ClientTimeout(total=12)
         ) as r:
             html = ""
             if r.status == 200:
                 html = await r.text()
             elif r.status == 403 and cookie_val:
                 headers.pop("Cookie", None)
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=3)) as r2:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as r2:
                     if r2.status == 200:
                         html = await r2.text()
 
@@ -517,7 +518,7 @@ async def _fetch_atcoder(session: aiohttp.ClientSession) -> list[dict]:
     try:
         url = "https://competeapi.vercel.app/contests/atcoder/"
         headers = {"User-Agent": "Mozilla/5.0 (compatible; CPBot/1.0)", "Accept": "application/json"}
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=4)) as r:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
             if r.status == 200:
                 data = await r.json(content_type=None)
                 comp_list = data.get("future_contests") or data.get("contests") or (data if isinstance(data, list) else [])
@@ -543,12 +544,12 @@ async def _fetch_atcoder(session: aiohttp.ClientSession) -> list[dict]:
     except Exception as e:
         print(f"[contests/atcoder] competeapi fetch error: {e}", flush=True)
 
-    # ── Fallback 2: kenkoooo community JSON (fast 3.5s timeout) ────────────
+    # ── Fallback 2: kenkoooo community JSON ─────────────────────────────────
     try:
         url = "https://kenkoooo.com/atcoder/resources/contests.json"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         async with session.get(
-            url, headers=headers, timeout=aiohttp.ClientTimeout(total=3.5)
+            url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
         ) as r:
             if r.status == 200:
                 data = await r.json(content_type=None)
@@ -574,16 +575,42 @@ async def _fetch_atcoder(session: aiohttp.ClientSession) -> list[dict]:
     return results
 
 
+async def _fetch_custom_contests() -> list[dict]:
+    """Admin-added contests (!newContest / !addcontest), stored in
+    custom_contests. Kept in the same shape as the scraped platforms so they
+    sort and render identically on the site — no separate "admin contests"
+    code path to keep in sync."""
+    results: list[dict] = []
+    try:
+        now_ts = datetime.now(timezone.utc).timestamp()
+        async with get_pool().acquire() as conn:
+            rows = await q.get_upcoming_custom_contests(conn, str(config.GUILD_ID), now_ts)
+        for r in rows:
+            results.append({
+                "key":      "custom",
+                "id":       f"custom-{r['id']}",
+                "name":     r["name"],
+                "start_ts": float(r["start_ts"]),
+                "duration": r["duration"],
+                "url":      r["url"],
+            })
+    except Exception as e:
+        print(f"[contests/custom] fetch error: {e}", flush=True)
+    return results
+
+
 async def fetch_all_contests() -> list[dict]:
-    """Fetch upcoming contests from all 4 platforms concurrently."""
+    """Fetch upcoming contests from all platforms concurrently, plus any
+    admin-added ones from custom_contests."""
     async with aiohttp.ClientSession() as session:
-        cf, lc, cc, ac = await asyncio.gather(
+        cf, lc, cc, ac, custom = await asyncio.gather(
             _fetch_cf(session),
             _fetch_lc(session),
             _fetch_cc(session),
             _fetch_atcoder(session),
+            _fetch_custom_contests(),
         )
-    contests = cf + lc + cc + ac
+    contests = cf + lc + cc + ac + custom
     contests.sort(key=lambda x: x["start_ts"])
     return contests
 

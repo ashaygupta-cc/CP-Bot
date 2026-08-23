@@ -372,12 +372,33 @@ async def admin_help_cmd(ctx):
 
     # ── Duels — Admin (UPDATED) ────────────────────────────────────────────────
     admin_duel = discord.Embed(title="⚔️  Duels — Admin", color=0xED4245)
-    admin_duel.add_field(name="__Rating Management__", value=(
+    admin_duel.add_field(name="__Management & Controls__", value=(
         "```\n"
         "!duelsetrank @user <mode> <rating>  Set someone's duel rating\n"
+        "!endduel [duel_id]                  List active duels or force-end stuck duel\n"
         "```\n"
         "> `<mode>` here is the combined form: cp_blitz, cp_duel, dsa_blitz,\n"
-        "> dsa_duel, icpc_blitz, icpc_duel."
+        "> dsa_duel, icpc_blitz, icpc_duel.\n"
+        "> Alias: `!forceendduel` — cancels match without rating change."
+    ), inline=False)
+
+    admin_team_contest = discord.Embed(title="👥  Team, Contests & Stats — Admin", color=0x1ABC9C)
+    admin_team_contest.add_field(name="🏆  Contests Management", value=(
+        "```\n"
+        '!newcontest "<name>" <link> [date]   Register contest (DB-backed, live on site)\n'
+        "```\n"
+        "> Aliases: `!newContest`, `!addcontest`. Date accepts `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (defaults to +7 days)."
+    ), inline=False)
+    admin_team_contest.add_field(name="👥  Team Roster Management", value=(
+        "```\n"
+        '!team "<name>" "<role>" <linkedin> [github]   Add/update website team member card\n'
+        "```\n"
+        "> Re-running `!team` for the same name updates their card in place instead of duplicating."
+    ), inline=False)
+    admin_team_contest.add_field(name="📊  Website Live Stats", value=(
+        "```\n"
+        "!updatestats <team> <contests> <followers>   Update live stats on website homepage\n"
+        "```"
     ), inline=False)
 
     admin_rst = discord.Embed(title="🔄  Reset", color=0x99AAB5)
@@ -414,7 +435,7 @@ async def admin_help_cmd(ctx):
         header, verif, problems, checking, lb, inact
     ])
     await ctx.send(embeds=[
-        admin_cfg, admin_pts, admin_duel, admin_sync, admin_rst
+        admin_cfg, admin_pts, admin_team_contest, admin_duel, admin_sync, admin_rst
     ])
 
 

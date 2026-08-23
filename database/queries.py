@@ -113,6 +113,88 @@ async def delete_handle(conn, discord_id: str, platform: str):
 
 
 # ══════════════════════════════════════════════════════════════
+#  TEAM MEMBERS (website /team page — see database/migration_team.sql)
+# ══════════════════════════════════════════════════════════════
+
+async def add_team_member(
+    conn, guild_id: str, name: str, role: str,
+    linkedin_url: str, github_url: str | None, added_by: str,
+) -> int:
+    """Adds a team member. If a member with the same name (case-insensitive)
+    already exists for this guild, updates their card in place instead of
+    creating a duplicate — running !team again for someone just edits them."""
+    existing = await conn.fetchrow(
+        "SELECT id FROM team_members WHERE guild_id = $1 AND LOWER(name) = LOWER($2)",
+        guild_id, name,
+    )
+    if existing:
+        await conn.execute(
+            """UPDATE team_members
+               SET role = $1, linkedin_url = $2, github_url = $3, added_by = $4
+               WHERE id = $5""",
+            role, linkedin_url, github_url, added_by, existing["id"],
+        )
+        return existing["id"]
+
+    next_order = await conn.fetchval(
+        "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM team_members WHERE guild_id = $1",
+        guild_id,
+    )
+    row = await conn.fetchrow(
+        """INSERT INTO team_members (guild_id, name, role, linkedin_url, github_url, sort_order, added_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           RETURNING id""",
+        guild_id, name, role, linkedin_url, github_url, next_order, added_by,
+    )
+    return row["id"]
+
+
+async def get_team_members(conn, guild_id: str) -> list:
+    return await conn.fetch(
+        """SELECT id, name, role, linkedin_url, github_url, sort_order, created_at
+           FROM team_members WHERE guild_id = $1
+           ORDER BY sort_order ASC, created_at ASC""",
+        guild_id,
+    )
+
+
+async def remove_team_member(conn, guild_id: str, name: str) -> bool:
+    result = await conn.execute(
+        "DELETE FROM team_members WHERE guild_id = $1 AND LOWER(name) = LOWER($2)",
+        guild_id, name,
+    )
+    return result.endswith(" 1")
+
+
+# ══════════════════════════════════════════════════════════════
+#  CUSTOM CONTESTS (!newContest / !addcontest)
+# ══════════════════════════════════════════════════════════════
+
+async def add_custom_contest(
+    conn, guild_id: str, name: str, url: str,
+    start_ts: float, added_by: str, duration: int = 7200,
+) -> int:
+    row = await conn.fetchrow(
+        """INSERT INTO custom_contests (guild_id, name, url, start_ts, duration, added_by)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id""",
+        guild_id, name, url, start_ts, duration, added_by,
+    )
+    return row["id"]
+
+
+async def get_upcoming_custom_contests(conn, guild_id: str, now_ts: float) -> list:
+    """Only future contests — past ones age out of the feed on their own."""
+    return await conn.fetch(
+        """SELECT id, name, url, start_ts, duration
+           FROM custom_contests
+           WHERE guild_id = $1 AND start_ts > $2
+           ORDER BY start_ts ASC""",
+        guild_id, now_ts,
+    )
+
+
+# ══════════════════════════════════════════════════════════════
 #  WEEKS
 # ══════════════════════════════════════════════════════════════
 

@@ -5,9 +5,10 @@ Commands: !setweek, !setmonth, !currentweek, !setpoints, !points
 
 import discord
 from discord.ext import commands
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 from database.connection import get_pool
 from database import queries as q
+from database import duel_queries as dq
 from config import (COLOR_SUCCESS, COLOR_INFO, COLOR_ERROR, COLOR_WARN,
                     COLOR_PURPLE, ADMIN_ROLE, DEFAULT_DIFFICULTY_POINTS)
 
@@ -251,45 +252,172 @@ class Admin(commands.Cog):
         embed.set_footer(text=f"Updated by {ctx.author.display_name}")
         await ctx.send(embed=embed)
 
-    @commands.command(name="addcontest")
+    @commands.command(name="addcontest", aliases=["newcontest", "newContest"])
     @is_admin()
     async def add_contest(self, ctx, title: str = None, cf_url: str = None, start_time: str = None):
         """
-        Register a new contest live on website portal with Codeforces link & countdown timer.
-        !addcontest "Binary Beats Contest 1" https://codeforces.com/contest/1234 "2026-08-20 18:00"
+        Register a new contest, persisted to the DB so it actually shows up
+        on the site (and survives bot restarts — the old version just
+        appended to an in-memory list nothing ever read).
+        !newcontest "Binary Beats Contest 1" https://codeforces.com/contest/1234 2026-08-20T18:00
+        Date accepts "YYYY-MM-DD", "YYYY-MM-DD HH:MM", or full ISO 8601.
         """
         if not title or not cf_url:
-            embed = discord.Embed(title="🏆  Add Contest  —  Usage", color=COLOR_INFO)
-            embed.add_field(name="Command", value='`!addcontest "<title>" <cf_url> [start_time_iso]`', inline=False)
-            embed.add_field(name="Example", value='`!addcontest "Binary Beats Weekly 1" https://codeforces.com/contest/1234 "2026-08-20 18:00"`', inline=False)
+            embed = discord.Embed(title="🏆  New Contest  —  Usage", color=COLOR_INFO)
+            embed.add_field(
+                name="Command",
+                value='`!newContest "<name>" <link> [date]`',
+                inline=False,
+            )
+            embed.add_field(
+                name="Example",
+                value='`!newContest "Binary Beats Weekly 1" https://codeforces.com/contest/1234 2026-08-20T18:00`',
+                inline=False,
+            )
+            embed.set_footer(text='Date defaults to 7 days from now if omitted. Aliases: !addcontest')
             await ctx.send(embed=embed)
             return
 
-        from api_server import _REGISTERED_CONTESTS
-        contest_item = {
-          "id": f"contest-{len(_REGISTERED_CONTESTS) + 1}",
-          "title": title,
-          "url": cf_url,
-          "platform": "Codeforces",
-          "start_time": start_time or "2026-08-20T18:00:00Z",
-          "status": "UPCOMING",
-        }
-        _REGISTERED_CONTESTS.append(contest_item)
+        start_dt = None
+        if start_time:
+            for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    start_dt = datetime.strptime(start_time, fmt).replace(tzinfo=timezone.utc)
+                    break
+                except ValueError:
+                    continue
+            if start_dt is None:
+                await ctx.send("❌  Couldn't parse that date. Try `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`.")
+                return
+        else:
+            start_dt = datetime.now(timezone.utc) + timedelta(days=7)
 
-        embed = discord.Embed(title="🚀  Contest Registered Live on Website", color=COLOR_SUCCESS)
-        embed.add_field(name="Title", value=title, inline=False)
-        embed.add_field(name="Portal Link", value=cf_url, inline=False)
-        embed.add_field(name="Starts At", value=start_time or "Upcoming", inline=False)
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await q.add_custom_contest(
+                conn, str(ctx.guild.id), title, cf_url,
+                start_dt.timestamp(), str(ctx.author.id),
+            )
+
+        embed = discord.Embed(title="🚀  Contest Added", color=COLOR_SUCCESS)
+        embed.add_field(name="Name", value=title, inline=False)
+        embed.add_field(name="Link", value=cf_url, inline=False)
+        embed.add_field(name="Starts", value=f"<t:{int(start_dt.timestamp())}:F>", inline=False)
+        embed.set_footer(text=f"Added by {ctx.author.display_name} · live on the site now")
         await ctx.send(embed=embed)
+
+    # ── !team ───────────────────────────────────────────────────────────────
+
+    @commands.command(name="team")
+    @is_admin()
+    async def team_add(
+        self, ctx, name: str = None, role: str = None,
+        linkedin_url: str = None, github_url: str = None,
+    ):
+        """
+        Add (or update, if the name already exists) a member's card on the
+        site's Team page.
+        !team "Jane Doe" "Dev Lead" https://linkedin.com/in/janedoe https://github.com/janedoe
+        GitHub is optional.
+        """
+        if not name or not role or not linkedin_url:
+            embed = discord.Embed(title="👥  Team  —  Usage", color=COLOR_INFO)
+            embed.add_field(
+                name="Command",
+                value='`!team "<name>" "<role>" <linkedinURL> [githubURL]`',
+                inline=False,
+            )
+            embed.add_field(
+                name="Example",
+                value='`!team "Jane Doe" "Dev Lead" https://linkedin.com/in/janedoe https://github.com/janedoe`',
+                inline=False,
+            )
+            embed.set_footer(text="Running this again for the same name updates their card instead of duplicating it.")
+            await ctx.send(embed=embed)
+            return
+
+        if "linkedin.com" not in linkedin_url.lower():
+            await ctx.send("❌  That doesn't look like a LinkedIn URL. Usage: `!team \"<name>\" \"<role>\" <linkedinURL> [githubURL]`")
+            return
+        if github_url and "github.com" not in github_url.lower():
+            await ctx.send("❌  That doesn't look like a GitHub URL.")
+            return
+
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await q.add_team_member(conn, str(ctx.guild.id), name, role, linkedin_url, github_url, str(ctx.author.id))
+
+        embed = discord.Embed(title="👥  Team Member Saved", color=COLOR_SUCCESS)
+        embed.add_field(name="Name", value=name, inline=True)
+        embed.add_field(name="Role", value=role, inline=True)
+        embed.add_field(name="LinkedIn", value=linkedin_url, inline=False)
+        if github_url:
+            embed.add_field(name="GitHub", value=github_url, inline=False)
+        embed.set_footer(text=f"Added by {ctx.author.display_name} · live on the site now")
+        await ctx.send(embed=embed)
+
+    # ── !endduel ────────────────────────────────────────────────────────────
+
+    @commands.command(name="endduel", aliases=["forceendduel"])
+    @is_admin()
+    async def end_duel(self, ctx, duel_id: int = None):
+        """
+        Force-end a stuck active duel/blitz match (admin escape hatch for
+        glitches — e.g. someone's client crashed mid-match and never
+        forfeited). Marks it cancelled without awarding a winner or applying
+        a rating change either way.
+        !endduel 128
+        """
+        if duel_id is None:
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                active = await dq.get_all_active_duels(conn)
+            if not active:
+                await ctx.send("✅  No active duels right now.")
+                return
+            lines = [f"`#{d['id']}` — <@{d['p1_id']}> vs <@{d.get('p2_id') or 'bot'}> · {d['mode']}" for d in active[:15]]
+            embed = discord.Embed(title="⚔️  Active Duels", description="\n".join(lines), color=COLOR_INFO)
+            embed.set_footer(text="!endduel <id> to force-end one")
+            await ctx.send(embed=embed)
+            return
+
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            duel = await dq.get_duel(conn, duel_id)
+            if not duel:
+                await ctx.send(f"❌  No duel with id `{duel_id}`.")
+                return
+            if duel["status"] != "active":
+                await ctx.send(f"⚠️  Duel `{duel_id}` isn't active (status: `{duel['status']}`) — nothing to end.")
+                return
+            await dq.set_duel_status(conn, duel_id, "cancelled")
+
+        embed = discord.Embed(
+            title="🛑  Duel Force-Ended",
+            description=f"Duel `#{duel_id}` was cancelled by an admin. No rating change was applied to either side.",
+            color=COLOR_WARN,
+        )
+        embed.set_footer(text=f"Ended by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+        try:
+            channel = ctx.guild.get_channel(int(duel["channel_id"])) if duel.get("channel_id") else None
+            if channel and channel.id != ctx.channel.id:
+                await channel.send(embed=embed)
+        except Exception:
+            pass
 
     @set_week.error
     @set_month.error
     @set_points.error
     @update_stats.error
     @add_contest.error
+    @team_add.error
+    @end_duel.error
     async def admin_error(self, ctx, error):
         if isinstance(error, commands.CheckFailure):
             await ctx.send(f"❌  You need the **{ADMIN_ROLE}** role or Administrator permission.")
+        elif isinstance(error, commands.BadArgument):
+            await ctx.send(f"❌  {error}")
 
 
 async def setup(bot):

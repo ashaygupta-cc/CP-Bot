@@ -109,7 +109,7 @@ _REGISTERED_CONTESTS = [
     {
         "id": "bb-contest-2",
         "title": "Binary Beats ICPC Practice Gym",
-        "url": "https://codeforces.com/gyms",
+        "url": "https://codeforces.com/group/hfiI9LqNuy/contests",
         "platform": "Codeforces",
         "start_time": "2026-08-25T17:00:00Z",
         "status": "UPCOMING",
@@ -370,6 +370,17 @@ async def modes(request: web.Request) -> web.Response:
             _guild(request),
         )
     return _json({"modes": [r["mode"] for r in recs]})
+
+
+async def team_index(request: web.Request) -> web.Response:
+    """GET /api/team — roster for the site's Team page. Seeded members
+    (founders/original leads) still live in the site's own static.ts as a
+    fallback; anything added via !team shows up here and the site merges
+    the two, own-DB entries taking priority by name."""
+    gid = _guild(request)
+    async with get_pool().acquire() as conn:
+        rows = await queries.get_team_members(conn, gid)
+    return _json({"members": _rows(rows)})
 
 
 async def profile(request: web.Request) -> web.Response:
@@ -2475,6 +2486,7 @@ def build_app() -> web.Application:
     r.add_get("/api/leaderboard/points", leaderboard_points)
     r.add_get("/api/leaderboard/rating", leaderboard_rating)
     r.add_get("/api/users/{discord_id}", profile)
+    r.add_get("/api/team", team_index)
     r.add_get("/api/duels", match_history)
     r.add_get("/api/duels/live", live_duels)
     r.add_post("/api/duels/create", create_duel_api)
@@ -2508,6 +2520,7 @@ def build_app() -> web.Application:
     r.add_get("/api/bot/problems", daily_problems)
     r.add_get("/api/bot/problems/{key}/statement", problem_statement_api)
     r.add_get("/api/bot/contests", upcoming_contests)
+    r.add_get("/api/bot/team", team_index)
     r.add_get("/api/bot/channels", channel_index)
     r.add_get("/api/bot/channels/{key}/messages", channel_messages)
     r.add_get("/api/bot/channels/{key}/threads", channel_threads)
