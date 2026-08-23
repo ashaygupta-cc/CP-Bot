@@ -454,11 +454,19 @@ async def match_history(request: web.Request) -> web.Response:
                d.bot_rating, d.status, d.winner_id, d.p1_games_won,
                d.p2_games_won, d.total_games, d.duel_number,
                d.started_at, d.ended_at,
-               u1.discord_username AS player1_name,
-               u2.discord_username AS player2_name
+               COALESCE(NULLIF(u1.discord_username, ''), NULLIF(h1.handle, ''), d.player1_id) AS player1_name,
+               COALESCE(NULLIF(u2.discord_username, ''), NULLIF(h2.handle, ''), d.player2_id) AS player2_name
         FROM duels d
-        LEFT JOIN users u1 ON u1.discord_id = d.player1_id
-        LEFT JOIN users u2 ON u2.discord_id = d.player2_id
+        LEFT JOIN users u1 ON LOWER(u1.discord_id) = LOWER(d.player1_id)
+        LEFT JOIN users u2 ON LOWER(u2.discord_id) = LOWER(d.player2_id)
+        LEFT JOIN (
+            SELECT DISTINCT ON (LOWER(discord_id)) discord_id, handle
+            FROM handles ORDER BY LOWER(discord_id), linked_at DESC
+        ) h1 ON LOWER(h1.discord_id) = LOWER(d.player1_id)
+        LEFT JOIN (
+            SELECT DISTINCT ON (LOWER(discord_id)) discord_id, handle
+            FROM handles ORDER BY LOWER(discord_id), linked_at DESC
+        ) h2 ON LOWER(h2.discord_id) = LOWER(d.player2_id)
         WHERE d.guild_id = $1
           AND ($2::text IS NULL OR d.player1_id = $2 OR d.player2_id = $2)
           AND ($3::text IS NULL OR d.mode = $3)
@@ -476,11 +484,19 @@ async def live_duels(request: web.Request) -> web.Response:
     sql = """
         SELECT d.id, d.mode, d.duel_number, d.is_bot_match, d.started_at,
                d.current_game, d.total_games,
-               u1.discord_username AS player1_name,
-               u2.discord_username AS player2_name
+               COALESCE(NULLIF(u1.discord_username, ''), NULLIF(h1.handle, ''), d.player1_id) AS player1_name,
+               COALESCE(NULLIF(u2.discord_username, ''), NULLIF(h2.handle, ''), d.player2_id) AS player2_name
         FROM duels d
-        LEFT JOIN users u1 ON u1.discord_id = d.player1_id
-        LEFT JOIN users u2 ON u2.discord_id = d.player2_id
+        LEFT JOIN users u1 ON LOWER(u1.discord_id) = LOWER(d.player1_id)
+        LEFT JOIN users u2 ON LOWER(u2.discord_id) = LOWER(d.player2_id)
+        LEFT JOIN (
+            SELECT DISTINCT ON (LOWER(discord_id)) discord_id, handle
+            FROM handles ORDER BY LOWER(discord_id), linked_at DESC
+        ) h1 ON LOWER(h1.discord_id) = LOWER(d.player1_id)
+        LEFT JOIN (
+            SELECT DISTINCT ON (LOWER(discord_id)) discord_id, handle
+            FROM handles ORDER BY LOWER(discord_id), linked_at DESC
+        ) h2 ON LOWER(h2.discord_id) = LOWER(d.player2_id)
         WHERE d.guild_id = $1 AND d.status = 'active'
         ORDER BY d.started_at DESC
     """
