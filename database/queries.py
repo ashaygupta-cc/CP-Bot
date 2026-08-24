@@ -827,3 +827,9 @@ async def set_config(conn, key: str, value: str, updated_by: str):
 
 async def delete_config(conn, key: str):
     await conn.execute("DELETE FROM bot_config WHERE key = $1", key)
+
+
+# Aliases for get_config / set_config / delete_config
+get_bot_config = get_config
+set_bot_config = set_config
+delete_bot_config = delete_config

@@ -2489,6 +2489,244 @@ async def problem_statement_api(request: web.Request) -> web.Response:
         })
 
 
+async def ai_coach_api(request: web.Request) -> web.Response:
+    """POST /api/ai/coach — Generate Master AI CP Coach evaluation with 50-problem sheet for website."""
+    try:
+        from cogs.ai_agent import _call_gemini_api
+        body = await request.json()
+        did = body.get("discord_id") or ""
+        username = body.get("username") or "Coder"
+        current_rating = body.get("current_rating") or "1200"
+        target_rating = body.get("target_rating") or "1600"
+        weak_topics = body.get("weak_topics") or []
+        strong_topics = body.get("strong_topics") or []
+        daily_time = body.get("daily_time") or "2 hours / day"
+        goal = body.get("goal") or "Master Competitive Programming"
+
+        handles_str = "None registered"
+        solves_count = 0
+        db_problem_list = []
+
+        async with get_pool().acquire() as conn:
+            if did:
+                handles = await conn.fetch("SELECT platform, handle FROM handles WHERE discord_id = $1", str(did))
+                solves_count = await conn.fetchval("SELECT COUNT(*) FROM solves WHERE discord_id = $1", str(did))
+                if handles:
+                    handles_str = ", ".join([f"{h['platform'].upper()}: {h['handle']}" for h in handles])
+
+            rows = await conn.fetch(
+                "SELECT platform, problem_id, title, difficulty, points FROM problems ORDER BY id DESC LIMIT 50"
+            )
+            for r in rows:
+                db_problem_list.append(f"[{r['platform'].upper()}] {r['problem_id']} - {r['title'] or 'Problem'} ({r['difficulty']})")
+
+        sys_inst = (
+            "You are a legendary World Finalist & Grandmaster Competitive Programming Coach (rating 3000+). "
+            "Your coaching style is direct, elite, analytical, human-like, highly structured, and deeply technical. "
+            "Avoid generic AI responses or robotic pleasantries. Speak like a real pro mentor conducting an intensive coaching audit."
+        )
+
+        prompt = (
+            f"CONDUCT AN ELITE COMPETITIVE PROGRAMMING DIAGNOSTIC AUDIT & CURATED 50-PROBLEM PRACTICE ROADMAP.\n\n"
+            f"CODER DIAGNOSTIC PROFILE:\n"
+            f"• Username: {username}\n"
+            f"• Current Rating: {current_rating}\n"
+            f"• Target Rating: {target_rating}\n"
+            f"• Weak Topics (High Priority): {', '.join(weak_topics) if weak_topics else 'Dynamic Programming, Graph Theory'}\n"
+            f"• Strong Topics: {', '.join(strong_topics) if strong_topics else 'Implementation, Two Pointers'}\n"
+            f"• Daily Practice Capacity: {daily_time}\n"
+            f"• Target Career / Rank Goal: {goal}\n"
+            f"• Registered Handles: {handles_str}\n"
+            f"• Solves Count Recorded: {solves_count}\n\n"
+            f"DATABASE PROBLEMS AVAILABLE IN SYSTEM:\n"
+            f"{chr(10).join(db_problem_list[:25]) if db_problem_list else 'Codeforces & LeetCode standard problemset'}\n\n"
+            f"PROVIDE A COMPREHENSIVE 4-STAGE COACHING REPORT IN MARKDOWN:\n\n"
+            f"# 📊 1. Diagnostic Skill Gap Analysis\n"
+            f"- Evaluate current vs target rating gap.\n"
+            f"- Identify core algorithmic bottlenecks holding the coder back from reaching {target_rating}.\n"
+            f"- Breakdown time management and contest execution strategy.\n\n"
+            f"# 🎯 2. Customized 4-Week Milestone Curriculum\n"
+            f"- **Week 1 (Foundation & Speed Drill)**: Specific focus area and target solve pace.\n"
+            f"- **Week 2 (Weak Topic Deep-Dive)**: Mastering {', '.join(weak_topics[:2]) if weak_topics else 'Dynamic Programming'}.\n"
+            f"- **Week 3 (Advanced Patterns & Hard Problems)**: Problem-solving paradigms for rating {target_rating}.\n"
+            f"- **Week 4 (Contest Simulation & Rating Peak)**: Mock contest strategies.\n\n"
+            f"# 📝 3. Personalised 50-Problem Numbered Practice Sheet\n"
+            f"Provide an EXACT NUMBERED LIST of 50 targeted practice problems (numbered 1. to 50.), divided into 5 tiers of 10 problems each:\n"
+            f"- **Tier 1 (Problems 1-10: Warmup & Core Concept Enforcement)**\n"
+            f"- **Tier 2 (Problems 11-20: Weak Topic Remediation)**\n"
+            f"- **Tier 3 (Problems 21-30: Target Rating Bridge)**\n"
+            f"- **Tier 4 (Problems 31-40: High-Difficulty Challenge)**\n"
+            f"- **Tier 5 (Problems 41-50: Contest Mastery & Stretch Problems)**\n\n"
+            f"For each problem (1 to 50), specify:\n"
+            f"1. Number (1. to 50.)\n"
+            f"2. Platform & ID (e.g., Codeforces 1547C or LeetCode 300)\n"
+            f"3. Problem Title\n"
+            f"4. Difficulty / Target Rating\n"
+            f"5. Key Concept to practice (e.g., DP State Transitions, Binary Search on Answer)\n\n"
+            f"# 🚀 4. Final Master Advice\n"
+            f"A sharp, motivating 2-sentence summary from the GM Coach."
+        )
+
+        res = await _call_gemini_api(prompt, sys_inst)
+        if not res:
+            return _json({"error": "Gemini API key is not configured or request failed."}, status=500)
+        return _json({"analysis": res})
+    except Exception as e:
+        print(f"[ai_coach_api error]: {e}")
+        return _json({"error": str(e)}, status=500)
+
+
+async def ai_hint_api(request: web.Request) -> web.Response:
+    """POST /api/ai/hint — Generate progressive hints for a problem."""
+    try:
+        from cogs.ai_agent import _call_gemini_api
+        body = await request.json()
+        problem_id = body.get("problem_id", "").strip()
+        if not problem_id:
+            return _json({"error": "Missing problem_id"}, status=400)
+
+        prompt = (
+            f"A competitive programming student is working on problem: '{problem_id}'.\n"
+            f"Provide 3 progressive, non-spoiling hints:\n"
+            f"• **Hint 1 (Key Observation)**: Conceptual intuition or mathematical property to look for.\n"
+            f"• **Hint 2 (Algorithmic Technique)**: Data structure or paradigm to use (e.g. DP, Segment Tree, Binary Search, Two Pointers).\n"
+            f"• **Hint 3 (High-Level Outline)**: Step-by-step logic without writing complete executable code.\n"
+            f"Do NOT output complete C++/Python code. Keep it brief and encouraging."
+        )
+
+        res = await _call_gemini_api(prompt, "You are a helpful CP tutor who gives hints without spoiling solutions.")
+        if not res:
+            return _json({"error": "Gemini API key is not configured or request failed."}, status=500)
+        return _json({"hints": res})
+    except Exception as e:
+        print(f"[ai_hint_api error]: {e}")
+        return _json({"error": str(e)}, status=500)
+
+
+async def ai_explain_api(request: web.Request) -> web.Response:
+    """POST /api/ai/explain — Explain a CP topic with C++ template."""
+    try:
+        from cogs.ai_agent import _call_gemini_api
+        body = await request.json()
+        topic = body.get("topic", "").strip()
+        if not topic:
+            return _json({"error": "Missing topic"}, status=400)
+
+        prompt = (
+            f"Explain the Competitive Programming topic: '{topic}'.\n"
+            f"Structure the response clearly:\n"
+            f"1. **Core Concept & Intuition**: What problem type does it solve?\n"
+            f"2. **Time & Space Complexity**: Best, average, worst case.\n"
+            f"3. **C++17 Implementation Template**: Clean, production-ready competitive programming code snippet.\n"
+            f"4. **Common Pitfalls & Tricks**: 1-based indexing, integer overflow, edge cases."
+        )
+
+        res = await _call_gemini_api(prompt, "You are an expert CP algorithms instructor.")
+        if not res:
+            return _json({"error": "Gemini API key is not configured or request failed."}, status=500)
+        return _json({"guide": res})
+    except Exception as e:
+        print(f"[ai_explain_api error]: {e}")
+        return _json({"error": str(e)}, status=500)
+
+
+async def ai_review_api(request: web.Request) -> web.Response:
+    """POST /api/ai/review — Code review for complexity and bugs."""
+    try:
+        from cogs.ai_agent import _call_gemini_api
+        body = await request.json()
+        code = body.get("code", "").strip()
+        if not code:
+            return _json({"error": "Missing code"}, status=400)
+
+        prompt = (
+            f"Review this Competitive Programming code snippet:\n```cpp\n{code[:2000]}\n```\n"
+            f"Evaluate:\n"
+            f"1. **Time & Space Complexity**: Big-O notation.\n"
+            f"2. **Correctness & Edge Cases**: Integer overflow (`int` vs `long long`), out-of-bounds, uninitialized variables.\n"
+            f"3. **Optimization Suggestions**: Faster I/O (`cin.tie(NULL)`), vector pre-allocation, algorithmic improvements."
+        )
+
+        res = await _call_gemini_api(prompt, "You are a code reviewer specialized in competitive programming.")
+        if not res:
+            return _json({"error": "Gemini API key is not configured or request failed."}, status=500)
+        return _json({"review": res})
+    except Exception as e:
+        print(f"[ai_review_api error]: {e}")
+        return _json({"error": str(e)}, status=500)
+
+
+_session_memories: dict[str, list[dict]] = {}
+
+async def ai_chat_api(request: web.Request) -> web.Response:
+    """POST /api/ai/chat — Conversational AI Companion for floating 3D bot widget."""
+    try:
+        from cogs.ai_agent import _call_gemini_api
+        body = await request.json()
+        session_id = body.get("session_id") or "default_session"
+        user_message = body.get("message", "").strip()
+        current_page = body.get("current_page", "home")
+        user_name = body.get("username") or "Coder"
+
+        if not user_message:
+            return _json({"error": "Missing message"}, status=400)
+
+        if session_id not in _session_memories:
+            _session_memories[session_id] = []
+
+        history = _session_memories[session_id]
+        if len(history) > 24:
+            _session_memories[session_id] = history[-24:]
+            history = _session_memories[session_id]
+
+        history_formatted = ""
+        for h in history:
+            role_label = "User" if h["role"] == "user" else "Assistant"
+            history_formatted += f"{role_label}: {h['content']}\n"
+
+        system_instruction = (
+            "You are Binary Beats' official 3D Companion Bot — a classy, intelligent, polite, and sharp AI assistant & Competitive Programming mentor. "
+            "IMPORTANT GUIDELINES:\n"
+            "1. ADAPTIVE LANGUAGE: Speak in Hindi, English, or Hinglish based on the language used by the user!\n"
+            "2. NO CHEESY EMOJIS: Do NOT use robotic emojis like 🤖, 🦾, 🚀 everywhere. Use clean, Discord-style markdown formatting (**bold**, `code`, > quotes).\n"
+            "3. IN-APP NAVIGATION DIRECTIVES: If the user asks to go/view a page or panel (e.g. 'take me to leaderboard', 'show arena', 'open content', 'go to team', 'show about', 'open profile'), "
+            "append '[NAV:page_id]' at the END of your response. Valid NAV targets: [NAV:leaderboards], [NAV:content], [NAV:arena], [NAV:community], [NAV:team], [NAV:about], [NAV:u], [NAV:feed].\n"
+            "4. CONTEXT MEMORY: You remember previous messages in the conversation and user preferences."
+        )
+
+        prompt = (
+            f"User Context:\n"
+            f"• User Name: {user_name}\n"
+            f"• Current Web Panel: {current_page}\n\n"
+            f"Recent Conversation History:\n"
+            f"{history_formatted}\n"
+            f"User: {user_message}\n"
+            f"Assistant:"
+        )
+
+        reply = await _call_gemini_api(prompt, system_instruction)
+        if not reply:
+            return _json({"error": "Gemini API service unavailable."}, status=500)
+
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "model", "content": reply})
+
+        nav_target = None
+        nav_match = re.search(r"\[NAV:([a-zA-Z0-9_]+)\]", reply)
+        if nav_match:
+            nav_target = nav_match.group(1)
+            reply = reply.replace(nav_match.group(0), "").strip()
+
+        return _json({
+            "reply": reply,
+            "navigate": nav_target,
+            "session_id": session_id
+        })
+    except Exception as e:
+        print(f"[ai_chat_api error]: {e}")
+        return _json({"error": str(e)}, status=500)
+
+
 def build_app() -> web.Application:
     app = web.Application(middlewares=[_cors])
     r = app.router
@@ -2532,6 +2770,13 @@ def build_app() -> web.Application:
     r.add_get("/api/guild", guild_stats)
     r.add_get("/api/contests", upcoming_contests)
 
+    # ── AI Agent endpoints ──
+    r.add_post("/api/ai/coach", ai_coach_api)
+    r.add_post("/api/ai/hint", ai_hint_api)
+    r.add_post("/api/ai/explain", ai_explain_api)
+    r.add_post("/api/ai/review", ai_review_api)
+    r.add_post("/api/ai/chat", ai_chat_api)
+
     # ── /api/bot/* route aliases for legacy frontend compatibility ──
     r.add_get("/api/bot/problems", daily_problems)
     r.add_get("/api/bot/problems/{key}/statement", problem_statement_api)
@@ -2546,6 +2791,11 @@ def build_app() -> web.Application:
     r.add_get("/api/bot/duels/state/{id}", get_duel_state_api)
     r.add_post("/api/bot/duels/verify", verify_duel_submission_api)
     r.add_post("/api/bot/duels/forfeit", forfeit_duel_api)
+    r.add_post("/api/bot/ai/coach", ai_coach_api)
+    r.add_post("/api/bot/ai/hint", ai_hint_api)
+    r.add_post("/api/bot/ai/explain", ai_explain_api)
+    r.add_post("/api/bot/ai/review", ai_review_api)
+    r.add_post("/api/bot/ai/chat", ai_chat_api)
 
     r.add_get("/api/internal/hardtests/{pid}", get_hardtests)
     r.add_post("/api/problems/check", check_submissions)

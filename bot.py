@@ -94,6 +94,7 @@ COGS = [
     "cogs.contests",       # ← upcoming contest reminders
     "cogs.duels",          # ← 1v1 duel system (CF/LC/ICPC + bot opponent)
     "cogs.website_sync",   # ← mirrors configured channels into PG for the website
+    "cogs.ai_agent",       # ← Personalised AI CP Coach Agent (Gemini)
 ]
 
 
@@ -252,6 +253,15 @@ async def help_cmd(ctx, section: str = None):
         "Daily    midnight IST (auto)\n"
         "Weekly   active week's end-date\n"
         "Monthly  active month's end-date\n"
+        "```"
+    ), inline=False)
+
+    em.add_field(name="__🤖 Personalised AI CP Coach__", value=(
+        "```\n"
+        "!coach [@user]                  Personalised training roadmap based on your stats\n"
+        "!hint <problem_id>              Progressive step-by-step hints without code spoils\n"
+        "!explain <topic/algorithm>      CP technique explanation & C++17 template\n"
+        "!review <code>                  Code complexity, TLE/MLE risk & bug analysis\n"
         "```"
     ), inline=False)
 

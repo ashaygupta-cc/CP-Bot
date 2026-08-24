@@ -433,6 +433,20 @@ async def _fetch_cc(session: aiohttp.ClientSession) -> list[dict]:
     return results
 
 
+async def _get_atcoder_cookie() -> str | None:
+    """Retrieve stored AtCoder REVEL_SESSION cookie from bot_config database table."""
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            val = await q.get_bot_config(conn, "atcoder_session")
+            if not val:
+                val = await q.get_bot_config(conn, "atcoder_cookie")
+            return val
+    except Exception as e:
+        print(f"[contests/atcoder] cookie lookup error: {e}", flush=True)
+        return None
+
+
 async def _fetch_atcoder(session: aiohttp.ClientSession) -> list[dict]:
     """
     AtCoder upcoming contests — fetches all future contests with fast, tight timeouts (4s max).
