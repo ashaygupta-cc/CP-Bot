@@ -145,4 +145,5 @@ SYNCED_CHANNELS = {
     "1433864900484009985": "team_info",
     "1453507423125110815": "find_us_online",
     "1526149678796898305": "oa_questions",
+    "1518305550914293942": "daily_problems",
 }

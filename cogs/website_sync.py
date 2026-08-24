@@ -354,7 +354,21 @@ class WebsiteSync(commands.Cog):
                         pass
 
                 for t in threads:
-                    async for msg in t.history(limit=limit):
+                    # Fetch messages in chronological order
+                    t_msgs = [m async for m in t.history(limit=limit or 500, oldest_first=True)]
+                    if not t_msgs:
+                        continue
+                    
+                    # For daily_problems/daily_editorials threads, skip first message (the daily problem announcement prompt)
+                    is_daily = "daily" in ckey or "editorial" in ckey
+                    msgs_to_sync = t_msgs[1:] if (is_daily and len(t_msgs) > 1) else t_msgs
+                    
+                    for msg in msgs_to_sync:
+                        # For community submissions, filter attachments to strictly <= 10 KB (10240 bytes)
+                        if is_daily and msg.attachments:
+                            valid_attachments = [a for a in msg.attachments if a.size <= 10240]
+                            # If message has only oversized attachments, skip oversized ones
+                            msg.attachments = valid_attachments
                         await self._upsert(msg, ckey)
                         count += 1
 
@@ -413,6 +427,23 @@ class WebsiteSync(commands.Cog):
         total, failed = await self._perform_sync(key, limit=10, status_msg=status)
         note = f"\n⚠️  Skipped: {', '.join(failed)}" if failed else ""
         await status.edit(content=f"✅  Sync completed for `{key}`. Synced {total} messages.{note}")
+
+    @commands.command(name="syncprune")
+    @commands.has_permissions(administrator=True)
+    async def sync_prune_30d(self, ctx):
+        """Prune daily problems and submissions older than 30 days."""
+        async with get_pool().acquire() as conn:
+            deleted_msgs = await conn.execute(
+                """DELETE FROM discord_messages 
+                   WHERE channel_key IN ('daily_problems', 'daily_editorials') 
+                   AND created_at < NOW() - INTERVAL '30 days'"""
+            )
+            deleted_threads = await conn.execute(
+                """DELETE FROM discord_threads 
+                   WHERE channel_key IN ('daily_problems', 'daily_editorials') 
+                   AND created_at < NOW() - INTERVAL '30 days'"""
+            )
+        await ctx.send(f"🧹 30-Day Retention Prune Complete:\n• Messages removed: {deleted_msgs}\n• Threads removed: {deleted_threads}")
 
     @commands.command(name="syncstatus")
     @commands.has_permissions(administrator=True)

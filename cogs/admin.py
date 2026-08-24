@@ -406,6 +406,68 @@ class Admin(commands.Cog):
         except Exception:
             pass
 
+    # ── !prunedaily / !pruneold ──────────────────────────────────────────
+
+    @commands.command(name="prunedaily", aliases=["pruneold", "prune30d"])
+    @is_admin()
+    async def prune_old_daily_data(self, ctx):
+        """
+        Admin-only manual command to prune out-of-window daily problem assignments
+        and thread submissions older than 30 days (1 month).
+        
+        SAFE: User solve history (solves), member points, streaks, and
+        leaderboard counts are 100% preserved and never touched.
+        """
+        status_msg = await ctx.send("⏳  Checking database for daily problems & submissions older than 30 days…")
+        pool = get_pool()
+        
+        async with pool.acquire() as conn:
+            # 1. Delete out-of-window messages in daily_problems and daily_editorials (> 30 days)
+            del_msgs_res = await conn.execute(
+                """DELETE FROM discord_messages 
+                   WHERE channel_key IN ('daily_problems', 'daily_editorials') 
+                   AND created_at < NOW() - INTERVAL '30 days'"""
+            )
+            # 2. Delete out-of-window threads (> 30 days)
+            del_threads_res = await conn.execute(
+                """DELETE FROM discord_threads 
+                   WHERE channel_key IN ('daily_problems', 'daily_editorials') 
+                   AND created_at < NOW() - INTERVAL '30 days'"""
+            )
+            # 3. Delete out-of-window daily_problems (> 30 days)
+            del_probs_res = await conn.execute(
+                """DELETE FROM daily_problems 
+                   WHERE assigned_date < CURRENT_DATE - INTERVAL '30 days'"""
+            )
+
+        # Parse counts from postgres tag (e.g. "DELETE 5")
+        def parse_count(res_str):
+            try:
+                return res_str.split()[-1] if res_str else "0"
+            except Exception:
+                return "0"
+
+        c_msgs = parse_count(del_msgs_res)
+        c_threads = parse_count(del_threads_res)
+        c_probs = parse_count(del_probs_res)
+
+        embed = discord.Embed(
+            title="🧹  30-Day Retention Prune Complete",
+            description="Cleaned out-of-window daily problem records and submissions older than 30 days.",
+            color=COLOR_SUCCESS if (c_msgs != "0" or c_threads != "0" or c_probs != "0") else COLOR_INFO
+        )
+        embed.add_field(name="Daily Problems Removed", value=f"`{c_probs}` rows", inline=True)
+        embed.add_field(name="Thread Submissions Removed", value=f"`{c_msgs}` messages", inline=True)
+        embed.add_field(name="Threads Removed", value=f"`{c_threads}` threads", inline=True)
+        embed.add_field(
+            name="🛡️ Data Safety Guarantee",
+            value="User solve history, points, streaks, and leaderboard standings remain **100% safe & intact**.",
+            inline=False
+        )
+        embed.set_footer(text=f"Executed manually by {ctx.author.display_name} · No auto-deletion")
+        
+        await status_msg.edit(content=None, embed=embed)
+
     @set_week.error
     @set_month.error
     @set_points.error
@@ -413,6 +475,7 @@ class Admin(commands.Cog):
     @add_contest.error
     @team_add.error
     @end_duel.error
+    @prune_old_daily_data.error
     async def admin_error(self, ctx, error):
         if isinstance(error, commands.CheckFailure):
             await ctx.send(f"❌  You need the **{ADMIN_ROLE}** role or Administrator permission.")

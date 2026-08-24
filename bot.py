@@ -429,8 +429,8 @@ async def admin_help_cmd(ctx):
         "```"
     ), inline=False)
 
-    admin_sync = discord.Embed(title="🌐  Website Sync — Admin", color=0x5865F2)
-    admin_sync.add_field(name="\u200b", value=(
+    admin_sync = discord.Embed(title="🌐  Website Sync & Maintenance — Admin", color=0x5865F2)
+    admin_sync.add_field(name="🔄  Sync Channels", value=(
         "```\n"
         "!syncultimate           Sync complete history across all channels\n"
         "!syncall                Sync last 10 messages across all channels\n"
@@ -438,7 +438,13 @@ async def admin_help_cmd(ctx):
         "!syncchannel <key> [n]  Sync custom number of messages of a channel\n"
         "!syncstatus             View row counts and last sync timestamps\n"
         "```\n"
-        "> **Note:** Bot automatically syncs the last 10 messages in background every hour."
+        "> **Daily Problems:** `!syncchannel daily_problems 500` skips 1st prompt and syncs user submissions <= 10 KB."
+    ), inline=False)
+    admin_sync.add_field(name="🧹  Database Retention Maintenance", value=(
+        "```\n"
+        "!prunedaily             Prune daily problems & submissions older than 30 days\n"
+        "```\n"
+        "> **Aliases:** `!pruneold`, `!prune30d`. Manual admin command: User solve records, points, and standings are 100% safe."
     ), inline=False)
 
     await ctx.send(embeds=[
