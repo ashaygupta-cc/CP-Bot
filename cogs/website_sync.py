@@ -359,16 +359,13 @@ class WebsiteSync(commands.Cog):
                     if not t_msgs:
                         continue
                     
-                    # For daily_problems/daily_editorials threads, skip first message (the daily problem announcement prompt)
-                    is_daily = "daily" in ckey or "editorial" in ckey
-                    msgs_to_sync = t_msgs[1:] if (is_daily and len(t_msgs) > 1) else t_msgs
+                    # Daily problems community channel: skip 1st prompt and enforce <= 10KB member upload limit
+                    is_daily_problems = (ckey == "daily_problems")
+                    msgs_to_sync = t_msgs[1:] if (is_daily_problems and len(t_msgs) > 1) else t_msgs
                     
                     for msg in msgs_to_sync:
-                        # For community submissions, filter attachments to strictly <= 10 KB (10240 bytes)
-                        if is_daily and msg.attachments:
-                            valid_attachments = [a for a in msg.attachments if a.size <= 10240]
-                            # If message has only oversized attachments, skip oversized ones
-                            msg.attachments = valid_attachments
+                        if is_daily_problems and msg.attachments:
+                            msg.attachments = [a for a in msg.attachments if a.size <= 10240]
                         await self._upsert(msg, ckey)
                         count += 1
 
