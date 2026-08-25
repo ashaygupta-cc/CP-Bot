@@ -1738,6 +1738,7 @@ async def delete_community_thread_api(request: web.Request) -> web.Response:
         pool = get_pool()
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM community_threads WHERE id = $1", thread_id)
+            await conn.execute("DELETE FROM community_comments WHERE thread_id = $1", thread_id)
         return _json({"status": "deleted"})
     except Exception as e:
         return _json({"error": str(e)}, status=500)
@@ -1749,6 +1750,7 @@ async def delete_community_comment_api(request: web.Request) -> web.Response:
     try:
         pool = get_pool()
         async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM community_comments WHERE id = $1", comment_id)
             row = await conn.fetchrow("SELECT comments_json FROM community_threads WHERE id = $1", thread_id)
             if row:
                 c_data = row["comments_json"]

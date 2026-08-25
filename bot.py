@@ -442,9 +442,11 @@ async def admin_help_cmd(ctx):
     ), inline=False)
     admin_sync.add_field(name="🧹  Database Retention Maintenance", value=(
         "```\n"
-        "!prunedaily             Prune daily problems & submissions older than 30 days\n"
+        "!prune_community       Prune community forum threads older than 15 days\n"
+        "!prunedaily            Prune daily problems & submissions older than 30 days\n"
         "```\n"
-        "> **Aliases:** `!pruneold`, `!prune30d`. Manual admin command: User solve records, points, and standings are 100% safe."
+        "> **!prune_community:** Aliases `!prune_community_posts`, `!prune_forum`. 15-day rolling forum archive.\n"
+        "> **!prunedaily:** Aliases `!pruneold`, `!prune30d`. User solve records, ratings, and points are 100% safe."
     ), inline=False)
 
     await ctx.send(embeds=[

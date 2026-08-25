@@ -468,6 +468,56 @@ class Admin(commands.Cog):
         
         await status_msg.edit(content=None, embed=embed)
 
+
+    # ── !prune_community (15-Day Retention Prune) ─────────────────────────
+
+    @commands.command(name="prune_community", aliases=["prune_community_posts", "prune_forum"])
+    @is_admin()
+    async def prune_community_posts_cmd(self, ctx):
+        """
+        Manually delete community forum threads, shared solutions, and comments older than 15 days.
+        !prune_community
+        """
+        status_msg = await ctx.send("⏳  Pruning community forum posts older than 15 days from database...")
+
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            # Delete threads older than 15 days
+            del_threads_res = await conn.execute(
+                """DELETE FROM community_threads
+                   WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '15 days'"""
+            )
+            # Delete comments older than 15 days
+            del_comments_res = await conn.execute(
+                """DELETE FROM community_comments
+                   WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '15 days'"""
+            )
+
+        def parse_count(res_str):
+            try:
+                return res_str.split()[-1] if res_str else "0"
+            except Exception:
+                return "0"
+
+        c_threads = parse_count(del_threads_res)
+        c_comments = parse_count(del_comments_res)
+
+        embed = discord.Embed(
+            title="🧹  15-Day Community Forum Prune Complete",
+            description="Cleaned out-of-window discussions, solutions, and comments older than 15 days.",
+            color=COLOR_SUCCESS if (c_threads != "0" or c_comments != "0") else COLOR_INFO
+        )
+        embed.add_field(name="Forum Threads Purged", value=f"`{c_threads}` threads", inline=True)
+        embed.add_field(name="Responses Purged", value=f"`{c_comments}` comments", inline=True)
+        embed.add_field(
+            name="⚡ Platform Health",
+            value="Forum feed remains ultra-responsive and adheres strictly to the 15-day rolling retention rule.",
+            inline=False
+        )
+        embed.set_footer(text=f"Executed manually by {ctx.author.display_name}")
+
+        await status_msg.edit(content=None, embed=embed)
+
     @set_week.error
     @set_month.error
     @set_points.error
@@ -476,6 +526,7 @@ class Admin(commands.Cog):
     @team_add.error
     @end_duel.error
     @prune_old_daily_data.error
+    @prune_community_posts_cmd.error
     async def admin_error(self, ctx, error):
         if isinstance(error, commands.CheckFailure):
             await ctx.send(f"❌  You need the **{ADMIN_ROLE}** role or Administrator permission.")

@@ -76,10 +76,22 @@ async def init_pool() -> asyncpg.Pool:
                     content TEXT NOT NULL,
                     tag TEXT NOT NULL,
                     upvotes INT DEFAULT 1,
+                    downvotes INT DEFAULT 0,
                     comments_count INT DEFAULT 0,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     comments_json JSONB DEFAULT '[]'::jsonb
                 );
+                ALTER TABLE community_threads ADD COLUMN IF NOT EXISTS downvotes INT DEFAULT 0;
+                CREATE TABLE IF NOT EXISTS community_comments (
+                    id TEXT PRIMARY KEY,
+                    thread_id TEXT REFERENCES community_threads(id) ON DELETE CASCADE,
+                    author TEXT NOT NULL,
+                    avatar TEXT NOT NULL,
+                    avatar_url TEXT,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_community_threads_created ON community_threads(created_at DESC);
             """)
             await duel_queries.cleanup_duplicate_user_ratings(conn)
     except Exception as e:
