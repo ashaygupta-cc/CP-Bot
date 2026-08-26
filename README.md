@@ -1,10 +1,10 @@
 # CP-Bot — Binary Beats Competitive Programming Discord Bot
 
-> **Version 13.0.1** · Python 3.14 · discord.py 2.3+ · PostgreSQL (Supabase + Neon)
+> **v14.0.2** · Python 3.14 · discord.py 2.3+ · PostgreSQL (Supabase + Neon)
 
-A full-featured Discord bot powering the **Binary Beats** competitive programming community. Tracks daily problem solves across four platforms, runs 1v1 rated duel matches, maintains daily/weekly/monthly leaderboards, mirrors server channels to a REST API for the website, and handles member onboarding — all within a single production-ready async Python application.
+A full-featured Discord bot powering the **Binary Beats** competitive programming community. Tracks daily problem solves across four platforms, runs 1v1 rated duel matches, maintains daily/weekly/monthly leaderboards, provides a personalised AI CP coaching system, mirrors server channels to a REST API for the website, and handles member onboarding — all within a single async Python application.
 
-> **Setting up for the first time?** The [Complete Setup Guide](SETUP_README.md) covers Discord role hierarchy, channel permissions, environment variables, and a step-by-step first-run checklist.
+> **Setting up for the first time?** See the [Complete Setup Guide](SETUP_README.md) for Discord role hierarchy, channel permissions, environment variables, and a first-run checklist.
 
 ---
 
@@ -17,12 +17,13 @@ A full-featured Discord bot powering the **Binary Beats** competitive programmin
 5. [Database Schema](#database-schema)
 6. [REST API Reference](#rest-api-reference)
 7. [Bot Commands](#bot-commands)
-8. [Background Tasks & Automation](#background-tasks--automation)
-9. [Duel System Deep Dive](#duel-system-deep-dive)
-10. [Environment Variables](#environment-variables)
-11. [Deployment (Render)](#deployment-render)
-12. [Local Setup](#local-setup)
-13. [Version History](#version-history)
+8. [Background Tasks](#background-tasks)
+9. [Duel System](#duel-system)
+10. [AI Coach System](#ai-coach-system)
+11. [Environment Variables](#environment-variables)
+12. [Deployment (Render)](#deployment-render)
+13. [Local Setup](#local-setup)
+14. [Version History](#version-history)
 
 ---
 
@@ -30,72 +31,67 @@ A full-featured Discord bot powering the **Binary Beats** competitive programmin
 
 | Feature | Description |
 |---|---|
-| **Multi-platform solve tracking** | Codeforces, LeetCode, CodeChef, AtCoder |
-| **Daily/Weekly/Monthly leaderboards** | Fully scoped, auto-reset, persistent |
-| **1v1 Duel System** | CP · DSA · ICPC families × Blitz & Duel formats, real Elo |
-| **Bot opponent** | AI-simulated opponent auto-matched on no human response |
-| **Contest reminders** | Fetches upcoming contests from CF/LC/CC/AtCoder, posts 12h/1h warnings |
-| **Inactivity tracker** | Monitors member solve history, posts to dedicated channel on 15/20/25/30 of each month |
-| **LinkedIn verification** | Auto-grants Member role on join; manual reverify flow available |
-| **Website REST API** | 40+ public + internal endpoints served from the same process |
-| **Channel mirroring** | 14 channels synced to Postgres for the website frontend |
-| **Manual point management** | Admin add/subtract/override points with full audit log |
-| **AtCoder cookie auth** | Stored REVEL_SESSION session for authenticated AtCoder checks |
-| **Webhook branding** | All messages posted through named webhooks (Z4s / Contest Reminder / Zodiac) |
+| Multi-platform solve tracking | Codeforces, LeetCode, CodeChef, AtCoder |
+| Daily/Weekly/Monthly leaderboards | Scoped, auto-reset, persistent |
+| 1v1 Duel System | CP, DSA, ICPC families in Blitz and Duel formats, real Elo |
+| Bot opponent | Sigmoid-calibrated AI auto-matched when no human responds |
+| AI CP Coach | Gemini-powered !coach, !hint, !explain, !review commands |
+| Contest reminders | Fetches from CF/LC/CC/AtCoder, posts 12h and 1h warnings |
+| Inactivity tracker | Monitors solve history, posts tiered reports on 15/20/25/30 of each month |
+| Member onboarding | Auto-grants Member role on join, Zodiac webhook welcome, DM guide |
+| LinkedIn verification | Persistent button flow for reverify/verifyall flows |
+| Website REST API | 50+ endpoints served from the same process |
+| Channel mirroring | 15 channels synced to Postgres, hourly background sync |
+| Manual point management | Admin add/subtract/override with full audit log |
+| Database maintenance | Configurable retention prune commands for daily problems and forum |
+| Team roster management | !team command updates website team page live |
+| Custom contests | Admin-added contests persisted to DB and served via API |
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         bot.py  (entry point)                   │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │ discord.py Bot  (prefix: !)                              │   │
-│  │  ├── cogs/registry.py      — handle registration         │   │
-│  │  ├── cogs/admin.py         — server configuration        │   │
-│  │  ├── cogs/problems.py      — problem management          │   │
-│  │  ├── cogs/checker.py       — solve verification          │   │
-│  │  ├── cogs/leaderboard.py   — leaderboard views           │   │
-│  │  ├── cogs/submissions.py   — recent submission lookup    │   │
-│  │  ├── cogs/reset.py         — data management             │   │
-│  │  ├── cogs/points.py        — manual point adjustments    │   │
-│  │  ├── cogs/verification.py  — member onboarding           │   │
-│  │  ├── cogs/inactivity.py    — inactivity monitoring       │   │
-│  │  ├── cogs/contests.py      — contest reminders           │   │
-│  │  ├── cogs/duels.py         — 1v1 match system            │   │
-│  │  └── cogs/website_sync.py  — channel → Postgres mirror   │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                   │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │ api_server.py  (aiohttp, port 10000)                     │   │
-│  │  Public REST API — 40+ endpoints, CORS, key-protected    │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-         │                          │
-         ▼                          ▼
-┌────────────────┐      ┌────────────────────────────┐
-│  Supabase PG   │      │  Neon PostgreSQL (2 pools)  │
-│  (main DB)     │      │  CF pool · LC pool          │
-│  users,solves  │      │  problem metadata / stmts   │
-│  handles,duels │      │                             │
-└────────────────┘      └────────────────────────────┘
-         │
-         ▼
-┌────────────────────────────────────────────────────┐
-│  Platform Adapters  (platforms/)                   │
-│  codeforces.py · leetcode.py · codechef.py         │
-│  atcoder.py · duel_cf_pool.py · duel_lc_pool.py    │
-└────────────────────────────────────────────────────┘
+bot.py  (entry point)
+  |
+  +-- aiohttp API server  (port 10000, starts immediately)
+  |
+  +-- discord.py Bot  (prefix: !)
+       |
+       +-- cogs/registry.py        handle registration
+       +-- cogs/admin.py           server configuration + maintenance
+       +-- cogs/problems.py        problem management
+       +-- cogs/checker.py         solve verification + nightly tasks
+       +-- cogs/leaderboard.py     leaderboard views
+       +-- cogs/submissions.py     recent submission lookup
+       +-- cogs/reset.py           data management
+       +-- cogs/points.py          manual point adjustments
+       +-- cogs/verification.py    member onboarding (auto + manual)
+       +-- cogs/inactivity.py      inactivity monitoring
+       +-- cogs/contests.py        contest reminders
+       +-- cogs/duels.py           1v1 match system
+       +-- cogs/website_sync.py    channel -> Postgres mirror
+       +-- cogs/ai_agent.py        Gemini AI CP Coach
+
+  Databases
+       +-- Supabase PostgreSQL     all live bot data
+       +-- Neon PostgreSQL (CF)    10k+ CF problem statement cache
+       +-- Neon PostgreSQL (LC)    LeetCode problem metadata
 ```
 
 ### Key Design Decisions
 
-- **Single-process, async-first** — the Discord bot and the HTTP API server run inside the same Python process as co-operating `asyncio` tasks. No inter-process communication needed.
-- **Bot is the source of truth** — the REST API is strictly read-only over tables the bot already writes. Nothing in `api_server.py` mutates rating, points, or duel state directly (except the web-arena duel endpoints, which call the same duel queries the Discord cogs use).
-- **Three PostgreSQL pools** — one Supabase pool for all live bot data, one Neon pool for the 10k+ Codeforces problem statement cache, one Neon pool for 2.6k LeetCode problem metadata.
-- **Webhook branding** — every public-facing message is posted via a named webhook (`Z4s`, `Contest Reminder`, `Zodiac`, `Your Helper`) rather than the raw bot identity, for a polished look.
-- **Graceful rate-limit recovery** — startup delay, per-user `!check` quotas (3/day, 1h cooldown), sequential bulk checks with per-member delays, and CF bulk-fetch fallback (zero per-problem API calls on block).
+**Single-process, async-first.** The Discord bot and the HTTP API server run inside the same Python process as co-operating asyncio tasks. The API starts immediately on startup, letting Render's health check pass while the bot applies its startup delay.
+
+**Bot is the source of truth.** The REST API is read-only over tables the bot already writes. The web arena duel endpoints (`/api/duels/create`, `/api/duels/verify`, `/api/duels/forfeit`) call the same duel queries the Discord cogs use.
+
+**Three PostgreSQL pools.** One Supabase pool for all live data, one Neon pool for the CF problem statement cache (6-hour TTL, fetched once per window), one Neon pool for LC problem metadata.
+
+**Webhook branding.** Public-facing messages go through named webhooks: `Z4s` (duels), `Contest Reminder` (contests), `Zodiac` (welcome), `Your Helper` (help commands).
+
+**CF rate-limit safety.** One bulk `user.status` fetch per `!check` regardless of how many CF problems are assigned. If CF returns a 403/503 or Cloudflare page, `CFBlockedError` is raised and CF is skipped for that run entirely. No per-problem fallback calls.
+
+**Exponential restart backoff.** On Discord 429/1015 or network errors, the process restarts via `os.execv` with a delay that doubles on each retry, capped at 600 seconds.
 
 ---
 
@@ -104,14 +100,14 @@ A full-featured Discord bot powering the **Binary Beats** competitive programmin
 | Layer | Technology |
 |---|---|
 | Language | Python 3.14 |
-| Discord | discord.py ≥ 2.3.2 |
-| HTTP server | aiohttp ≥ 3.9.0 |
-| Database driver | asyncpg ≥ 0.29.0 |
-| Environment | python-dotenv ≥ 1.0.0 |
+| Discord | discord.py >= 2.3.2 |
+| HTTP server | aiohttp >= 3.9.0 |
+| Database driver | asyncpg >= 0.29.0 |
+| Environment | python-dotenv >= 1.0.0 |
+| AI / LLM | Google Gemini 2.5-flash (free tier, falls back to 1.5-flash) |
 | Primary DB | Supabase PostgreSQL |
 | Problem DB | Neon PostgreSQL (CF + LC pools) |
 | Hosting | Render (web service, port 10000) |
-| Runtime | Python 3.14 |
 
 ---
 
@@ -119,244 +115,207 @@ A full-featured Discord bot powering the **Binary Beats** competitive programmin
 
 ```
 CP-Bot/
-├── bot.py                  # Entry point, help commands, startup logic
-├── config.py               # All env vars, constants, channel routing config
-├── api_server.py           # aiohttp REST API server (40+ endpoints)
-├── duel_bot_engine.py      # Bot opponent simulation logic
-├── duel_ranks.py           # CF-style Elo tier definitions (Newbie → LGM)
-├── keep_alive.py           # Legacy keepalive (superseded by api_server)
-├── ping.py                 # Health ping utility
-├── requirements.txt        # Python dependencies
-├── render.yaml             # Render deployment manifest
-│
-├── cogs/                   # discord.py cogs (one feature = one file)
-│   ├── admin.py            # !setweek, !setmonth, !setpoints, !updatestats, !addcontest
-│   ├── checker.py          # !check, !checkall, auto-check tasks
-│   ├── contests.py         # !contests, !contestcheck, reminder background task
-│   ├── duels.py            # !duel, !blitz, profile, leaderboard, rank — full duel engine
-│   ├── inactivity.py       # !inactivity, !inactivitycheck, !exempt* — scheduled reports
-│   ├── leaderboard.py      # !leaderboard, !lbfull, !lbdaily, !lbweekly, !lbmonthly
-│   ├── points.py           # !addpoints, !subpoints, !setmemberpoints, !pointlog
-│   ├── problems.py         # !problems, !addproblem, !removeproblem, !setdifficulty, !rius
-│   ├── registry.py         # !register, !unregister, !profile, !handles
-│   ├── reset.py            # !resetdaily, !resetweek, !resetmonth, !resetalltime, ...
-│   ├── submissions.py      # !submissions
-│   ├── verification.py     # on_member_join, !reverify, !verifyall, !verificationstatus
-│   └── website_sync.py     # !sync*, !syncstatus, hourly background mirror
-│
-├── database/
-│   ├── connection.py       # asyncpg pool init (Supabase + CF Neon + LC Neon)
-│   ├── queries.py          # All core bot queries (users, solves, problems, weeks, etc.)
-│   ├── duel_queries.py     # Duel-specific queries (ratings, match state, pair history)
-│   ├── schema.sql          # Full PostgreSQL schema (run once)
-│   ├── migrate_v1_to_v2.sql
-│   ├── migration_duels.sql
-│   ├── migration_v2_2.sql
-│   └── migration_website_sync.sql
-│
-└── platforms/
-    ├── base.py             # Abstract base class for platform adapters
-    ├── codeforces.py       # CF: submission check, bulk fetch, handle verify
-    ├── leetcode.py         # LC: GraphQL submission check, handle verify
-    ├── codechef.py         # CC: submission check via public API
-    ├── atcoder.py          # AtCoder: submission check with session cookie auth
-    ├── duel_cf_pool.py     # CF problem pool: pick problems by rating + pair history
-    └── duel_lc_pool.py     # LC problem pool: pick Easy/Medium/Hard by pair history
++-- bot.py                   Entry point, help commands, startup logic
++-- config.py                All env vars, constants, channel routing
++-- api_server.py            aiohttp REST API (50+ endpoints)
++-- duel_bot_engine.py       Bot opponent simulation (sigmoid timing model)
++-- duel_ranks.py            CF-style Elo tier definitions
++-- keep_alive.py            Legacy health server (superseded by api_server)
++-- ping.py                  Health ping utility
++-- requirements.txt
++-- render.yaml              Render deployment manifest
+|
++-- cogs/
+|    +-- admin.py            Period config, contests, team, maintenance
+|    +-- ai_agent.py         Gemini AI CP Coach (!coach !hint !explain !review)
+|    +-- checker.py          !check, !checkall, nightly tasks
+|    +-- contests.py         Contest reminders, 12h/1h warnings
+|    +-- duels.py            1v1 duel system, ratings, channels
+|    +-- inactivity.py       Inactivity reports on 15/20/25/30
+|    +-- leaderboard.py      Daily/Weekly/Monthly boards
+|    +-- points.py           Manual point adjustments
+|    +-- problems.py         Problem management
+|    +-- registry.py         Handle registration, profile
+|    +-- reset.py            Data reset commands
+|    +-- submissions.py      Recent submissions view
+|    +-- verification.py     Member onboarding, reverify flow
+|    +-- website_sync.py     Channel mirror to Postgres
+|
++-- database/
+|    +-- connection.py       asyncpg pool init (3 pools)
+|    +-- queries.py          Core bot queries
+|    +-- duel_queries.py     Duel-specific queries
+|    +-- schema.sql          Base PostgreSQL schema
+|    +-- migrate_v1_to_v2.sql
+|    +-- migration_duels.sql
+|    +-- migration_v2_2.sql
+|    +-- migration_website_sync.sql
+|
++-- platforms/
+     +-- base.py             Abstract adapter base class
+     +-- codeforces.py       CF: bulk fetch, verify, CFBlockedError
+     +-- leetcode.py         LC: GraphQL check, handle verify
+     +-- codechef.py         CC: submission check
+     +-- atcoder.py          AtCoder: session-cookie authenticated check
+     +-- duel_cf_pool.py     CF problem pool: rating-targeted picker, 6h cache
+     +-- duel_lc_pool.py     LC problem pool: Easy/Medium/Hard sequencer
 ```
 
 ---
 
 ## Database Schema
 
-All tables live in one Supabase PostgreSQL database. The schema is in `database/schema.sql`.
-
-### Core Tables
+### Core Tables (schema.sql)
 
 #### `users`
-| Column | Type | Description |
+| Column | Type | Notes |
 |---|---|---|
-| `discord_id` | TEXT PK | Discord user snowflake |
-| `discord_username` | TEXT | Display name at registration time |
-| `created_at` | TIMESTAMPTZ | Row creation time |
+| `discord_id` | TEXT PK | Discord snowflake |
+| `discord_username` | TEXT | Display name at registration |
+| `created_at` | TIMESTAMPTZ | |
 
 #### `handles`
-| Column | Type | Description |
+| Column | Type | Notes |
 |---|---|---|
-| `discord_id` | TEXT FK → users | Discord user |
+| `discord_id` | TEXT FK | |
 | `platform` | TEXT | `cf`, `lc`, `cc`, `atcoder` |
-| `handle` | TEXT | Platform username/slug |
-| `verified` | BOOLEAN | Handle verification state |
-| `linked_at` | TIMESTAMPTZ | When handle was linked |
+| `handle` | TEXT | Platform username |
+| `verified` | BOOLEAN | |
+| `linked_at` | TIMESTAMPTZ | |
 
 PK: `(discord_id, platform)`
 
 #### `weeks`
-| Column | Type | Description |
+| Column | Type | Notes |
 |---|---|---|
-| `id` | SERIAL PK | Auto-incrementing week ID |
-| `guild_id` | TEXT | Discord server ID |
-| `label` | TEXT | Display label e.g. `"Week 1"` |
-| `start_date` | DATE | Inclusive start |
-| `end_date` | DATE | Inclusive end |
-| `is_active` | BOOLEAN | Only one active week per guild |
+| `id` | SERIAL PK | |
+| `guild_id` | TEXT | |
+| `label` | TEXT | e.g. `"Week 1"` |
+| `start_date` | DATE | |
+| `end_date` | DATE | |
+| `is_active` | BOOLEAN | One active per guild |
 
 #### `months`
-| Column | Type | Description |
+| Column | Type | Notes |
 |---|---|---|
-| `id` | SERIAL PK | Auto-incrementing month ID |
-| `guild_id` | TEXT | Discord server ID |
-| `label` | TEXT | Display label e.g. `"June 2026"` |
-| `start_date` | DATE | Inclusive start |
-| `end_date` | DATE | Inclusive end |
-| `is_active` | BOOLEAN | Only one active month per guild |
+| `id` | SERIAL PK | |
+| `guild_id` | TEXT | |
+| `label` | TEXT | e.g. `"June 2026"` |
+| `start_date` | DATE | |
+| `end_date` | DATE | |
+| `is_active` | BOOLEAN | One active per guild |
 
 #### `problems`
-| Column | Type | Description |
+| Column | Type | Notes |
 |---|---|---|
-| `id` | SERIAL PK | Database problem ID |
-| `guild_id` | TEXT | Discord server ID |
-| `week_id` | INTEGER FK → weeks | Owning week |
-| `month_id` | INTEGER FK → months | Owning month (nullable) |
-| `platform` | TEXT | `cf`, `lc`, `cc`, `atcoder` |
-| `problem_id` | TEXT | Platform-native ID (e.g. `1234A`, `two-sum`) |
-| `title` | TEXT | Problem title (nullable, filled lazily) |
-| `difficulty` | TEXT | `easy`, `medium`, `hard`, `expert`, `master` |
-| `points` | INTEGER | Points awarded on solve |
-| `set_by` | TEXT | Admin discord_id who added it |
-| `assigned_date` | DATE | The specific day this problem is active |
+| `id` | SERIAL PK | |
+| `guild_id` | TEXT | |
+| `week_id` | INTEGER FK | |
+| `month_id` | INTEGER FK | nullable |
+| `platform` | TEXT | |
+| `problem_id` | TEXT | Platform-native ID |
+| `title` | TEXT | Filled lazily |
+| `difficulty` | TEXT | `easy`/`medium`/`hard`/`expert`/`master` |
+| `points` | INTEGER | |
+| `set_by` | TEXT | Admin discord_id |
+| `assigned_date` | DATE | Required, exact day this problem is active |
 
 Unique: `(guild_id, week_id, platform, problem_id)`
 
 #### `solves`
-| Column | Type | Description |
+| Column | Type | Notes |
 |---|---|---|
 | `id` | SERIAL PK | |
-| `discord_id` | TEXT FK → users | Solver |
-| `problem_db_id` | INTEGER FK → problems | Solved problem |
-| `guild_id` | TEXT | Discord server ID |
-| `solved_at` | TIMESTAMPTZ | Verified solve timestamp |
-| `points_awarded` | INTEGER | Points credited |
+| `discord_id` | TEXT FK | |
+| `problem_db_id` | INTEGER FK | Cascades on delete |
+| `guild_id` | TEXT | |
+| `solved_at` | TIMESTAMPTZ | |
+| `points_awarded` | INTEGER | |
 
 Unique: `(discord_id, problem_db_id)` — one solve per user per problem.
 
 #### `difficulty_points`
-| Column | Type | Description |
-|---|---|---|
-| `guild_id` | TEXT | Discord server ID |
-| `difficulty` | TEXT | Difficulty label |
-| `points` | INTEGER | Points value |
-
-PK: `(guild_id, difficulty)`. Default values: `easy=5`, `medium=10`, `hard=20`, `expert=35`, `master=50`.
+PK: `(guild_id, difficulty)`. Defaults: easy=5, medium=10, hard=20, expert=35, master=50.
 
 #### `point_adjustments`
-| Column | Type | Description |
-|---|---|---|
-| `id` | SERIAL PK | |
-| `guild_id` | TEXT | Discord server ID |
-| `discord_id` | TEXT FK → users | Target member |
-| `delta` | INTEGER | Positive = add, negative = subtract |
-| `reason` | TEXT | Admin-supplied reason |
-| `adjusted_by` | TEXT | Admin discord_id |
-| `created_at` | TIMESTAMPTZ | |
+Manual bonus/penalty log. `delta` is positive for adds, negative for subtracts.
 
 #### `bot_config`
-| Column | Type | Description |
-|---|---|---|
-| `key` | TEXT PK | Config key (e.g. `atcoder_session`) |
-| `value` | TEXT | Stored value |
-| `updated_by` | TEXT | Who last set it |
-| `updated_at` | TIMESTAMPTZ | |
+Generic key/value store. Used for AtCoder `REVEL_SESSION` cookie and `announcement:*` keys served by the API.
 
-### Duel Tables (added via `migration_duels.sql`)
+### Duel Tables (migration_duels.sql)
 
 #### `duels`
-Stores every match (active or finished).
-
-| Key Column | Description |
-|---|---|
-| `id` | SERIAL PK |
-| `guild_id` | Discord server ID |
-| `mode` | `cp_duel`, `cp_blitz`, `dsa_duel`, `dsa_blitz`, `icpc_duel`, `icpc_blitz` |
-| `player1_id` / `player2_id` | Discord IDs |
-| `is_bot_match` | Whether opponent is the AI bot |
-| `bot_rating` | Simulated bot rating for bot matches |
-| `status` | `pending`, `active`, `finished` |
-| `winner_id` | Discord ID of winner (NULL = draw) |
-| `p1_games_won` / `p2_games_won` | Problem-level score |
-| `total_games` | 2 or 3 |
-| `duel_number` | Sequential match number per guild |
-| `channel_id` | Private match channel Discord snowflake |
-| `current_game` | Index of currently active problem |
-| `started_at` / `ended_at` | Match timestamps |
+One row per match. Key columns: `mode`, `player1_id`, `player2_id`, `is_bot_match`, `bot_rating`, `status` (`pending`/`active`/`finished`/`cancelled`), `winner_id`, `p1_games_won`, `p2_games_won`, `total_games`, `duel_number`, `channel_id`, `current_game`, `started_at`, `ended_at`.
 
 #### `duel_problems`
-One row per problem per match.
-
-| Key Column | Description |
-|---|---|
-| `duel_id` | FK → duels |
-| `game_number` | Problem position (1, 2, or 3) |
-| `platform` | `cf` or `lc` |
-| `problem_id` | Platform-native ID |
-| `difficulty` | Rating number (CF) or Easy/Medium/Hard (LC) |
-| `rating` | Numeric CF rating target |
-| `url` | Direct problem URL |
-| `deadline_at` | Per-problem expiry (blitz) or match expiry (duel) |
-| `p1_solved_at` / `p2_solved_at` | Verified solve timestamps |
-| `game_winner` | Discord ID of who won this problem |
+One row per problem per match. Key columns: `duel_id`, `game_number`, `platform`, `problem_id`, `difficulty`, `rating`, `url`, `deadline_at`, `p1_solved_at`, `p2_solved_at`, `game_winner`.
 
 #### `duel_ratings`
-One row per `(discord_id, guild_id, mode)`.
-
-| Key Column | Description |
-|---|---|
-| `discord_id` | Discord user |
-| `guild_id` | Discord server |
-| `mode` | Match mode (6 modes total) |
-| `rating` | Current Elo/points rating (starts at 800) |
-| `wins` / `losses` / `draws` | Career record |
-| `streak` | Positive = win streak, negative = loss streak |
-| `bot_matches` | Count of bot-opponent matches |
+One row per `(discord_id, guild_id, mode)`. Starts at 800. Columns: `rating`, `wins`, `losses`, `draws`, `streak`, `bot_matches`.
 
 #### `pair_history`
-Tracks which problems have been served to a pair of players to avoid repeats.
+Tracks which problems have been served to a pair to avoid repeats.
 
-### Website Sync Tables (added via `migration_website_sync.sql`)
+### Website Sync Tables (migration_website_sync.sql)
 
 #### `discord_messages`
-Full mirror of messages from 14 configured channels. Includes `content`, `embeds` (jsonb), `attachments` (jsonb), `thread_id`, `is_pinned`, `reply_to_id`.
+Full mirror of messages from 15 configured channels. Includes `content`, `embeds` (jsonb), `attachments` (jsonb), `thread_id`, `is_pinned`, `reply_to_id`, `synced_at`.
 
 #### `discord_threads`
 Thread index: `thread_id`, `editorial_date`, `message_count`, `has_pdf`, `is_archived`.
 
 #### `guild_snapshot`
-Guild-level stats updated every 5 minutes: `member_count`, `online_count`, `boost_count`, `channel_count`, etc.
+Live guild stats updated every 5 minutes: `member_count`, `online_count`, `boost_count`, `channel_count`, `role_count`.
+
+### Auto-created at Startup (connection.py)
 
 #### `community_threads`
-User-generated community posts from the website forum: `title`, `author`, `content`, `tag`, `upvotes`, `comments_json`.
+Website forum posts. Columns: `id`, `title`, `author`, `avatar`, `avatar_url`, `post_image_url`, `content`, `tag`, `upvotes`, `downvotes`, `comments_count`, `created_at`, `comments_json` (jsonb).
+
+#### `community_comments`
+Forum comments, FK to `community_threads` with CASCADE delete.
+
+#### `custom_contests`
+Admin-added contests via `!newcontest`. Columns: `id`, `guild_id`, `name`, `url`, `start_ts`, `duration`, `added_by`, `created_at`.
+
+#### `team_members`
+Website team page roster via `!team`. Columns: `id`, `guild_id`, `name`, `role`, `linkedin_url`, `github_url`, `added_by`, `created_at`.
 
 ---
 
 ## REST API Reference
 
-The API server starts on the port configured via `PORT` (default: `10000`) alongside the Discord bot. All `GET` endpoints are public. Endpoints under `/api/internal/` require the `X-BB-Key` header set to `BB_API_KEY`.
+The API server starts on `PORT` (default 10000) alongside the Discord bot. All `GET` routes are public unless noted. Routes under `/api/internal/` require the `X-BB-Key: <BB_API_KEY>` header.
 
-CORS is configured via `BB_ALLOWED_ORIGINS`. The `/api/bot/*` paths are legacy aliases for frontend compatibility.
+CORS is controlled by `BB_ALLOWED_ORIGINS`. Methods supported: `GET`, `POST`, `OPTIONS`.
 
 ### Health
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/` | Health check — returns `{"status":"ok","database":"ok"}` |
+| `GET` | `/` | Health check, returns `{"status":"ok","database":"ok"}` |
 | `GET` | `/health` | Same as `/` |
 
 ### Community Stats
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/stats` | Live counters: `discord_members`, `team_members`, `contests_held`, `linkedin_followers`, plus DB totals for `members`, `problems`, `solves`, `duels`, `verified_handles` |
+`GET /api/stats`
 
-**Query params:** `guild_id` (optional, overrides server-level default)
+Returns live counters. Reads from DB for `members`, `problems`, `solves`, `duels`, `verified_handles`. Custom counters for `team_members`, `contests_held`, `linkedin_followers` are set via `!updatestats`.
+
+```json
+{
+  "discord_members": 250,
+  "team_members": 11,
+  "contests_held": 2,
+  "linkedin_followers": 450,
+  "members": 80,
+  "problems": 120,
+  "solves": 540,
+  "duels": 38,
+  "verified_handles": 65
+}
+```
 
 ### Problems
 
@@ -364,171 +323,71 @@ CORS is configured via `BB_ALLOWED_ORIGINS`. The `/api/bot/*` paths are legacy a
 |---|---|---|
 | `GET` | `/api/problems` | Paginated problem catalog |
 | `GET` | `/api/problems/{id}/solvers` | Who solved a problem |
-| `GET` | `/api/problems/{key}/statement` | Full problem statement with examples |
+| `GET` | `/api/problems/{key}/statement` | Full problem statement |
 | `POST` | `/api/problems/check` | Trigger solve check for a user |
 
 #### `GET /api/problems`
 
-| Query Param | Type | Description |
+| Param | Type | Description |
 |---|---|---|
-| `page` | int | Page number (default: 1) |
+| `page` | int | Page number (default 1) |
 | `pageSize` / `limit` | int | Results per page (max 500, default 60) |
-| `platform` | string | Filter: `codeforces`, `cf`, `leetcode`, `lc` |
+| `platform` | string | `codeforces`, `cf`, `leetcode`, `lc` |
 | `search` | string | Search by title or problem ID |
-| `difficulty` | string | Filter by difficulty level |
-
-**Response:**
-```json
-{
-  "problems": [
-    {
-      "id": 42,
-      "platform": "cf",
-      "problem_id": "1234A",
-      "title": "Problem Title",
-      "difficulty": "medium",
-      "points": 10,
-      "assigned_date": "2026-08-17",
-      "week_label": "Week 3",
-      "solve_count": 5,
-      "key": "1234A",
-      "contestId": 1234,
-      "index": "A",
-      "rating": 1200,
-      "tags": ["Medium", "CF"],
-      "judgeable": true
-    }
-  ],
-  "total": 120,
-  "page": 1,
-  "pages": 2
-}
-```
+| `difficulty` | string | Filter by difficulty |
 
 #### `GET /api/problems/{key}/statement`
 
-Fetches the full problem statement. Falls back through multiple sources:
-1. CF/LC Neon DB cache
-2. Live platform API / GraphQL
-3. Codeforces HTML scraper
-4. Hugging Face HARDTESTS dataset
+Falls back through: Neon DB cache -> live CF/LC API -> CF HTML scraper -> Hugging Face HARDTESTS dataset.
 
-| Query Param | Description |
+| Param | Description |
 |---|---|
-| `platform` | Hint for platform detection (`codeforces`, `leetcode`) |
+| `platform` | Hint: `codeforces` or `leetcode` |
 
-**Response:**
-```json
-{
-  "problem": {
-    "key": "1234A",
-    "title": "Problem Title",
-    "rating": 1200,
-    "tags": ["Greedy", "Math"],
-    "timeLimitMs": 2000,
-    "memoryLimitMb": 256,
-    "description": "...",
-    "inputFormat": "...",
-    "outputFormat": "...",
-    "note": "...",
-    "examples": [{"input": "3\n1 2 3", "output": "6"}],
-    "platform": "codeforces",
-    "starterCode": ""
-  }
-}
-```
+Returns full statement with `description`, `inputFormat`, `outputFormat`, `note`, `examples`, `tags`, `timeLimitMs`, `memoryLimitMb`, `starterCode`.
 
 #### `POST /api/problems/check`
 
-**Body:**
-```json
-{ "discord_id": "123456789", "guild_id": "..." }
-```
+Body: `{"discord_id": "123...", "guild_id": "..."}`
 
-**Response:**
-```json
-{ "success": true, "results": ["1. CF 1234A — Solved · +10 pts"], "earned": 10 }
-```
+Calls the Checker cog's `_check_member` internally. Returns `{"success": true, "results": [...], "earned": 10}`.
 
 ### Leaderboards
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/leaderboard/points` | Points leaderboard (daily/week/month/all) |
-| `GET` | `/api/leaderboard/rating` | Duel rating leaderboard per mode |
-| `GET` | `/api/modes` | List all active duel modes |
+| `GET` | `/api/leaderboard/points` | Points leaderboard |
+| `GET` | `/api/leaderboard/rating` | Duel rating leaderboard |
+| `GET` | `/api/modes` | Active duel modes from DB |
 
 #### `GET /api/leaderboard/points`
 
-| Query Param | Values | Description |
+| Param | Values | Description |
 |---|---|---|
-| `scope` | `all`, `daily`, `week`, `month` | Leaderboard scope (default: `all`) |
-| `limit` | int (max 500) | Max entries (default: 100) |
+| `scope` | `all`, `daily`, `week`, `month` | Default: `all` |
+| `limit` | int | Max 500, default 100 |
 | `date` | `YYYY-MM-DD` | Only for `scope=daily` |
-| `guild_id` | string | Discord server ID |
-
-**Response:**
-```json
-{
-  "scope": "week",
-  "entries": [
-    {
-      "rank": 1,
-      "discord_id": "123456789",
-      "discord_username": "tourist",
-      "points": 150,
-      "solved": 12
-    }
-  ]
-}
-```
 
 #### `GET /api/leaderboard/rating`
 
-| Query Param | Values | Description |
+| Param | Values | Description |
 |---|---|---|
-| `mode` | `cp_duel`, `cp_blitz`, `dsa_duel`, `dsa_blitz`, `icpc_duel`, `icpc_blitz` | Mode (default: `cp_duel`) |
-| `limit` | int (max 500) | Max entries (default: 100) |
+| `mode` | `cp_duel`, `cp_blitz`, `dsa_duel`, `dsa_blitz`, `icpc_duel`, `icpc_blitz` | Default: `cp_duel` |
+| `limit` | int | Max 500, default 100 |
 
-**Response:**
-```json
-{
-  "mode": "cp_duel",
-  "entries": [
-    {
-      "rank": 1,
-      "discord_id": "123456789",
-      "discord_username": "tourist",
-      "rating": 1850,
-      "wins": 20,
-      "losses": 3,
-      "draws": 1,
-      "streak": 5,
-      "bot_matches": 2,
-      "updated_at": "2026-08-17T10:00:00Z"
-    }
-  ]
-}
-```
+Returns entries with `rank`, `discord_id`, `discord_username`, `rating`, `wins`, `losses`, `draws`, `streak`, `bot_matches`, `updated_at`.
 
 ### Users
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/users/{discord_id}` | Full user profile |
+`GET /api/users/{discord_id}`
 
-**Response:**
-```json
-{
-  "user": { "discord_id": "...", "discord_username": "...", "created_at": "..." },
-  "handles": [{ "platform": "cf", "handle": "tourist", "verified": true }],
-  "ratings": [{ "mode": "cp_duel", "rating": 1200, "wins": 5, "losses": 2, "draws": 1 }],
-  "points": 250,
-  "solved": 18,
-  "streak": 4,
-  "recent_solves": [{ "platform": "cf", "problem_id": "1234A", "title": "...", "points_awarded": 10 }]
-}
-```
+Returns full user profile: `user`, `handles`, `ratings`, `points`, `solved`, `streak`, `recent_solves`.
+
+### Team
+
+`GET /api/team`
+
+Returns team member roster added via `!team`. The website merges this with its own static fallback, with DB entries taking priority by name.
 
 ### Duels
 
@@ -536,22 +395,13 @@ Fetches the full problem statement. Falls back through multiple sources:
 |---|---|---|
 | `GET` | `/api/duels` | Match history |
 | `GET` | `/api/duels/live` | Currently active matches |
-| `GET` | `/api/duels/state/{id}` | Full state of a single match |
-| `POST` | `/api/duels/create` | Create a new match (web arena) |
+| `GET` | `/api/duels/state/{id}` | Full state of one match |
+| `POST` | `/api/duels/create` | Create a match (web arena) |
 | `POST` | `/api/duels/verify` | Submit a solve verification |
 | `POST` | `/api/duels/forfeit` | Forfeit an active match |
 
-#### `GET /api/duels`
-
-| Query Param | Description |
-|---|---|
-| `discord_id` | Filter to matches involving this user |
-| `mode` | Filter by mode (e.g. `cp_blitz`) |
-| `limit` | Max results (max 100, default 25) |
-
 #### `POST /api/duels/create`
 
-**Body:**
 ```json
 {
   "mode": "dsa_blitz",
@@ -562,51 +412,37 @@ Fetches the full problem statement. Falls back through multiple sources:
 }
 ```
 
-**Response:** Full duel object including `duel_id`, ratings, and problem list with URLs.
+Returns full duel object with `duel_id`, `ratings`, and `problems` list with URLs. Also broadcasts to Discord and creates a private match channel.
 
 #### `POST /api/duels/verify`
 
-**Body:**
 ```json
-{ "duel_id": 42, "discord_id": "123456789" }
+{"duel_id": 42, "discord_id": "123456789"}
 ```
 
-**Response:**
-```json
-{
-  "verified": true,
-  "game_number": 1,
-  "solved_by": "123456789",
-  "finished": false,
-  "winner_id": null,
-  "p1_games_won": 1,
-  "p2_games_won": 0
-}
-```
+Returns `{"verified": bool, "game_number": int, "solved_by": "...", "finished": bool, "winner_id": "...", "p1_games_won": int, "p2_games_won": int}`.
 
 #### `POST /api/duels/forfeit`
 
-**Body:**
 ```json
-{ "duel_id": 42, "discord_id": "123456789" }
+{"duel_id": 42, "discord_id": "123456789"}
 ```
 
-**Response:** Rating changes for both players, winner ID.
+Applies real Elo delta (same K-factor formula as Discord bot). Returns rating changes for both players.
 
 ### Contests
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/contests` | Upcoming contests from all 4 platforms (cached, 30-min refresh) |
+`GET /api/contests`
 
-**Response:**
+Returns upcoming contests from all platforms, cached in memory and refreshed every 30 minutes in the background. Responds instantly from cache. Also includes admin-added custom contests.
+
 ```json
 {
   "contests": [
     {
       "platform": "cf",
       "id": "2000",
-      "name": "Codeforces Round 1000 (Div. 2)",
+      "name": "Codeforces Round (Div. 2)",
       "start_ts": 1756000000.0,
       "duration": 7200,
       "url": "https://codeforces.com/contest/2000",
@@ -621,14 +457,14 @@ Fetches the full problem statement. Falls back through multiple sources:
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/community/threads` | All community posts |
-| `POST` | `/api/community/threads` | Create a new post |
+| `GET` | `/api/community/threads` | All forum posts (last 50) |
+| `POST` | `/api/community/threads` | Create a post |
 | `POST` | `/api/community/threads/{id}/upvote` | Upvote a post |
 | `POST` | `/api/community/threads/{id}/comments` | Add a comment |
 | `DELETE` | `/api/community/threads/{id}` | Delete a post |
 | `DELETE` | `/api/community/threads/{id}/comments/{cid}` | Delete a comment |
 
-### Channel Mirror (Website Sync)
+### Channel Mirror
 
 | Method | Path | Description |
 |---|---|---|
@@ -636,46 +472,53 @@ Fetches the full problem statement. Falls back through multiple sources:
 | `GET` | `/api/channels/{key}/messages` | Paginated messages from a channel |
 | `GET` | `/api/channels/{key}/threads` | Thread index for a channel |
 | `GET` | `/api/threads/{thread_id}/messages` | All messages inside a thread |
-| `GET` | `/api/editorials/{date}` | Editorial state for a given date (YYYY-MM-DD) |
+| `GET` | `/api/editorials/{date}` | Editorial state for a date (YYYY-MM-DD) |
 
 #### `GET /api/channels/{key}/messages`
 
-| Query Param | Description |
+| Param | Description |
 |---|---|
-| `limit` | Max messages (max 200, default 50) |
+| `limit` | Max 200, default 50 |
 | `before` | ISO timestamp cursor for pagination |
 | `pinned` | `1` to return only pinned messages |
 | `q` | Full-text search in content |
 | `threads` | `1` to include thread messages |
 
-**Valid channel keys:** `contest_reminder`, `server_updates`, `updates_official`, `competitions_info`, `ideas_feedback`, `self_promo`, `arena_guide`, `maths_lounge`, `cp_dsa_roadmap`, `daily_editorials`, `server_info`, `team_info`, `find_us_online`, `oa_questions`
+Valid channel keys: `contest_reminder`, `server_updates`, `updates_official`, `competitions_info`, `ideas_feedback`, `self_promo`, `arena_guide`, `maths_lounge`, `cp_dsa_roadmap`, `daily_editorials`, `server_info`, `team_info`, `find_us_online`, `oa_questions`, `daily_problems`
 
 #### `GET /api/editorials/{date}`
 
-Returns one of three states:
-- `{"status": "none"}` — no editorial thread exists
-- `{"status": "coming_soon", "thread": {...}}` — thread exists but no PDF
-- `{"status": "available", "thread": {...}, "files": [...]}` — PDF attached
+Returns one of three states: `{"status":"none"}`, `{"status":"coming_soon","thread":{...}}`, or `{"status":"available","thread":{...},"files":[...]}`.
+
+### Guild
+
+`GET /api/guild`
+
+Returns live guild snapshot from the `guild_snapshot` table (member count, boost tier, etc.).
+
+### Announcements
+
+`GET /api/announcements`
+
+Returns all `bot_config` rows with keys prefixed `announcement:`. Admins post from Discord, it lands on the website with no deploy.
 
 ### Discord OAuth
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/discord/login` | Redirect to Discord OAuth authorization |
-| `GET` | `/api/discord/callback` | OAuth callback handler, sets `bb_user_session` cookie |
-| `GET` | `/api/discord/me` | Current session info from cookie |
+| `GET` | `/api/discord/login` | Redirect to Discord OAuth |
+| `GET` | `/api/discord/callback` | OAuth callback, sets `bb_user_session` cookie |
+| `GET` | `/api/discord/me` | Current session from cookie |
 | `POST` | `/api/discord/logout` | Clear session cookie |
 
-### External API Proxies
+### External Proxies
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/cf/user/{handles}` | Proxy: Codeforces user info (rating, rank) |
-| `GET` | `/api/cf/status/{handle}` | Proxy: Codeforces recent submissions |
-| `GET` | `/api/cf/user/{handle}/rating-history` | Proxy: Codeforces rating history |
+| `GET` | `/api/cf/user/{handles}` | Proxy: CF user info (rating, rank) |
+| `GET` | `/api/cf/status/{handle}` | Proxy: CF recent submissions |
+| `GET` | `/api/cf/user/{handle}/rating-history` | Proxy: CF rating history |
 | `GET` | `/api/leetcode/status` | LeetCode health check |
-| `GET` | `/api/guild` | Live Discord guild snapshot (member count, boost tier, etc.) |
-| `GET` | `/api/announcements` | Bot config entries with `announcement:` prefix |
 
 ### Internal (Key-Protected)
 
@@ -683,253 +526,259 @@ Require header `X-BB-Key: <BB_API_KEY>`.
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/internal/membership` | Check which Discord IDs the bot has seen in the guild |
-| `GET` | `/api/internal/hardtests/{pid}` | Fetch hidden test cases from Hugging Face HARDTESTS dataset |
-
-#### `POST /api/internal/membership`
-
-**Body:** `{"discord_ids": ["123...", "456..."]}`  
-**Response:** `{"known": [...], "unknown": [...]}`
+| `POST` | `/api/internal/membership` | Check which Discord IDs the bot has seen |
+| `GET` | `/api/internal/hardtests/{pid}` | Fetch hidden test cases from HF HARDTESTS dataset |
 
 ---
 
 ## Bot Commands
 
-The command prefix is `!` by default (configurable via `PREFIX` env var).
+Command prefix is `!`. Members use `!help`. Admins use `!adminhelp`.
 
 ### Member Commands
 
-Available to all server members via `!help`.
-
-#### Registration — `cogs/registry.py`
+#### Registration (`cogs/registry.py`)
 
 | Command | Arguments | Description |
 |---|---|---|
-| `!register` | `<platform> <handle>` | Link a CP handle. Verifies the handle exists before storing. Platforms: `cf`, `lc`, `cc`, `atcoder` |
-| `!unregister` | `<platform>` | Unlink a previously registered handle |
+| `!register` | `<platform> <handle>` | Link a CP handle. Verifies it exists first. Platforms: `cf`, `lc`, `cc`, `atcoder` |
+| `!unregister` | `<platform>` | Unlink a handle |
 | `!profile` | `[@user]` | View linked handles, total points, solve count, today's points, manual adjustments |
-| `!handles` | `[platform]` | List all registered handles (optional: filter by platform) |
+| `!handles` | `[platform]` | List all registered handles, optionally filtered by platform |
 
-#### Problems — `cogs/problems.py`
-
-| Command | Arguments | Description |
-|---|---|---|
-| `!problems` | — | Show today's assigned problems split into DSA and CP sections, ordered easy → hard. Shows the active week label and day number |
-
-#### Solve Checking — `cogs/checker.py`
-
-| Command | Arguments | Description |
-|---|---|---|
-| `!check` | `[@user]` | Check today's solve status for yourself or another member. Rate-limited: 3 runs/day, 1-hour cooldown between runs |
-| `!submissions` | `<platform> [count] [@user]` | Browse recent submissions with verdicts. Aliases: `!subs`, `!recent` |
-
-#### Leaderboards — `cogs/leaderboard.py`
-
-| Command | Arguments | Description |
-|---|---|---|
-| `!leaderboard` | — | Show Daily + Weekly + Monthly leaderboards in one view (top 3 each). Aliases: `!lb`, `!rank`, `!top`, `!standings` |
-| `!points` | — | View the current difficulty → points mapping |
-| `!currentweek` | — | Show the active week and month with date ranges. Alias: `!week` |
-
-#### Duels — `cogs/duels.py`
-
-| Command | Syntax | Description |
-|---|---|---|
-| `!duel` | `@user <cp\|dsa\|icpc> [2\|3]` | Challenge a player — always DUEL mode (ICPC-style, one total timer). Format defaults to 3-problem |
-| `!blitz` | `@user <cp\|dsa\|icpc> [2\|3]` | Challenge a player — always BLITZ mode (speed race, per-problem timers). Format defaults to 3-problem |
-| `!duel leaderboard` | `[cp\|dsa\|icpc]` | Top 10 players in DUEL mode (family optional, defaults to CP) |
-| `!blitz leaderboard` | `[cp\|dsa\|icpc]` | Top 10 players in BLITZ mode |
-| `!duel rank` | `[cp\|dsa\|icpc]` | Your current DUEL tier/rating (all families if none given) |
-| `!blitz rank` | `[cp\|dsa\|icpc]` | Your current BLITZ tier/rating |
-| `!duelprofile` | `[@user]` | Full duel ratings and W/L/D record across all DUEL modes |
-| `!blitzprofile` | `[@user]` | Full blitz ratings and W/L/D record across all BLITZ modes |
-
-**Notes:**
-- If the challenged player does not respond within the configured timeout (default 15s), the challenger is **automatically matched against the bot**.
-- Players cannot challenge themselves, bot accounts, or have more than one active match at a time.
-- The family token (`cp`/`dsa`/`icpc`) and the format token (`2`/`3`) can appear in any order after the opponent mention.
-
-#### Configuration (All Members)
+#### Problems (`cogs/problems.py`)
 
 | Command | Description |
 |---|---|
-| `!help` | Member command reference. Admins use `!adminhelp` for admin commands |
+| `!problems` | Today's assigned problems split into DSA and CP sections, sorted easy to hard. Shows active week label and day number |
+
+#### Solve Checking (`cogs/checker.py`)
+
+| Command | Arguments | Description |
+|---|---|---|
+| `!check` | `[@user]` | Check today's solve status. Rate-limited: 3 runs/day, 1-hour cooldown |
+| `!submissions` | `<platform> [count] [@user]` | Recent submissions with verdicts. Aliases: `!subs`, `!recent` |
+
+#### Leaderboards (`cogs/leaderboard.py`)
+
+| Command | Description |
+|---|---|
+| `!leaderboard` | Daily + Weekly + Monthly in one view, top 3 each. Aliases: `!lb`, `!rank`, `!top`, `!standings` |
+| `!points` | Current difficulty -> points mapping |
+| `!currentweek` | Active week and month with date ranges. Alias: `!week` |
+
+#### Duels (`cogs/duels.py`)
+
+| Command | Syntax | Description |
+|---|---|---|
+| `!duel` | `@user <cp\|dsa\|icpc> [2\|3]` | Challenge in DUEL mode. Defaults to 3-problem. If opponent doesn't respond, auto-matched vs bot |
+| `!blitz` | `@user <cp\|dsa\|icpc> [2\|3]` | Challenge in BLITZ mode. Defaults to 3-problem |
+| `!duelprofile` | `[@user]` | Ratings and W/L/D across all DUEL modes |
+| `!blitzprofile` | `[@user]` | Ratings and W/L/D across all BLITZ modes |
+| `!duel leaderboard` | `[cp\|dsa\|icpc]` | Top players in DUEL mode |
+| `!blitz leaderboard` | `[cp\|dsa\|icpc]` | Top players in BLITZ mode |
+| `!duel rank` | `[cp\|dsa\|icpc]` | Your DUEL tier/rating (all families if none given) |
+| `!blitz rank` | `[cp\|dsa\|icpc]` | Your BLITZ tier/rating |
+
+The family token (`cp`/`dsa`/`icpc`) and the keyword (`leaderboard`/`rank`) can appear in any order after the command, e.g. `!duel leaderboard cp` or `!duel cp leaderboard`.
+
+#### AI CP Coach (`cogs/ai_agent.py`)
+
+| Command | Arguments | Description |
+|---|---|---|
+| `!coach` | `[@user]` | Personalised training roadmap based on your handle stats and duel ratings |
+| `!hint` | `<problem_id>` | Progressive hints without spoiling the solution. Works for CF and LC problems |
+| `!explain` | `<topic/algorithm>` | CP technique explanation with C++17 template and common problem patterns |
+| `!review` | `<code>` | Time/space complexity analysis, TLE/MLE risk detection, and bug analysis |
+
+Requires `GEMINI_API_KEY` in environment. Uses `gemini-2.5-flash`, falls back to `gemini-1.5-flash`.
 
 ---
 
 ### Admin Commands
 
-Require the `Administrator` Discord permission or the configured `ADMIN_ROLE` role. Available via `!adminhelp`.
+Require the `Administrator` Discord permission or the configured `ADMIN_ROLE` role. Run `!adminhelp` to see full syntax in Discord.
 
-#### Period Management — `cogs/admin.py`
+#### Period Management (`cogs/admin.py`)
 
 | Command | Arguments | Description |
 |---|---|---|
-| `!setweek` | `"<label>" <YYYY-MM-DD> <YYYY-MM-DD>` | Create and activate a new week. Deactivates the previous week automatically |
-| `!setmonth` | `"<label>" <YYYY-MM-DD> <YYYY-MM-DD>` | Create and activate a new month for the monthly leaderboard |
-| `!currentweek` | — | Show the active week and month |
+| `!setweek` | `"<label>" <YYYY-MM-DD> <YYYY-MM-DD>` | Create and activate a new week, auto-deactivates previous |
+| `!setmonth` | `"<label>" <YYYY-MM-DD> <YYYY-MM-DD>` | Create and activate a new month |
+| `!currentweek` | | Show active week and month. Alias: `!week` |
 | `!setpoints` | `<difficulty> <points>` | Set points for a difficulty level. Custom difficulties allowed |
-| `!updatestats` | `[team] [contests] [linkedin]` | Update live website stat counters (team members, contests held, LinkedIn followers) |
-| `!addcontest` | `"<title>" <cf_url> [start_time]` | Register an upcoming contest on the website portal |
+| `!updatestats` | `<team> <contests> <linkedin>` | Update website homepage live counters |
 
-#### Problem Management — `cogs/problems.py`
-
-| Command | Arguments | Description |
-|---|---|---|
-| `!addproblem` | `<platform> <id> <difficulty> <YYYY-MM-DD> [points]` | Add a problem to the active week for a specific date. Custom points override the difficulty default |
-| `!removeproblem` | `<db_id> [keep_history=yes]` | Remove a problem. Solve history kept by default; pass `no` to also delete solve records |
-| `!setdifficulty` | `<db_id> <difficulty>` | Change a problem's difficulty and recalculate its points |
-| `!removeifunsolved` | `<db_id>` | Safe removal: deletes immediately if unsolved, asks for confirmation if already solved. Alias: `!rius` |
-
-#### Solve Checking — `cogs/checker.py`
-
-| Command | Description |
-|---|---|
-| `!checkall` | Bulk-check every registered member for today's problems. Members processed sequentially with delay to avoid rate limits |
-
-#### Leaderboard Admin — `cogs/leaderboard.py`
+#### Contest and Team Management (`cogs/admin.py`)
 
 | Command | Arguments | Description |
 |---|---|---|
-| `!lbfull` | `[daily\|weekly\|monthly]` | Full paginated leaderboard (all users, 10 per page) |
-| `!lbdaily` | — | Shortcut for `!lbfull daily` |
-| `!lbweekly` | — | Shortcut for `!lbfull weekly` |
-| `!lbmonthly` | — | Shortcut for `!lbfull monthly` |
+| `!newcontest` | `"<name>" <link> [date]` | Register a contest, persisted to DB and live on the website. Aliases: `!addcontest`, `!newContest`. Date defaults to 7 days from now |
+| `!team` | `"<name>" "<role>" <linkedin> [github]` | Add or update a team member card on the website Team page. Re-running for the same name updates in place |
 
-#### Manual Points — `cogs/points.py`
+#### Problem Management (`cogs/problems.py`)
 
 | Command | Arguments | Description |
 |---|---|---|
-| `!addpoints` | `@user <amount> [reason]` | Grant bonus points to a member |
-| `!subpoints` | `@user <amount> [reason]` | Deduct points from a member |
-| `!setmemberpoints` | `@user <target_total> [reason]` | Force-set a member's adjustment total to an exact value |
-| `!pointlog` | `[@user]` | View recent manual point adjustments for a member (audit log) |
+| `!addproblem` | `<platform> <id> <difficulty> <YYYY-MM-DD> [points]` | Add a problem to the active week for a specific date |
+| `!removeproblem` | `<db_id> [keep_history]` | Remove a problem. Solve history kept by default; pass `no` to also delete solves |
+| `!setdifficulty` | `<db_id> <difficulty>` | Change difficulty and recalculate points |
+| `!removeifunsolved` | `<db_id>` | Instant delete if unsolved; asks to confirm if solved. Alias: `!rius` |
 
-#### Inactivity — `cogs/inactivity.py`
-
-| Command | Description |
-|---|---|
-| `!inactivity` | Run the full inactivity report now and post to `#inactivity-info` |
-| `!inactivitycheck` | Alias for `!inactivity` — manually trigger immediately |
-| `!exemptinactivity @user` | Exempt a member from inactivity warnings |
-| `!unexemptinactivity @user` | Remove a member's inactivity exemption |
-
-#### Verification — `cogs/verification.py`
+#### Solve Checking (`cogs/checker.py`)
 
 | Command | Description |
 |---|---|
-| `!sendverification` | Post the verification embed with buttons in the current channel |
-| `!reverify @user` | Reset a member back to pending verification state and DM instructions |
-| `!verifyall` | DM all unverified members with verification instructions |
-| `!verificationstatus` | Show counts of pending vs. verified members. Alias: `!vstatus` |
+| `!checkall` | Bulk-check every registered member for today's problems. Requires Administrator permission |
 
-#### Contests — `cogs/contests.py`
+#### Leaderboard Admin (`cogs/leaderboard.py`)
+
+| Command | Arguments | Description |
+|---|---|---|
+| `!lbfull` | `[daily\|weekly\|monthly]` | Full paginated leaderboard, all users, 10 per page |
+| `!lbdaily` | | Shortcut for `!lbfull daily` |
+| `!lbweekly` | | Shortcut for `!lbfull weekly` |
+| `!lbmonthly` | | Shortcut for `!lbfull monthly` |
+
+#### Manual Points (`cogs/points.py`)
+
+| Command | Arguments | Description |
+|---|---|---|
+| `!addpoints` | `@user <amount> [reason]` | Grant bonus points |
+| `!subpoints` | `@user <amount> [reason]` | Deduct points |
+| `!setmemberpoints` | `@user <target_total> [reason]` | Force-set adjustment total to exact value |
+| `!pointlog` | `[@user]` | Recent manual adjustments audit log |
+
+#### Inactivity (`cogs/inactivity.py`)
+
+| Command | Description |
+|---|---|
+| `!inactivity` | Run inactivity report now and post to `#inactivity-info` |
+| `!inactivitycheck` | Alias for `!inactivity` |
+| `!exemptinactivity @user` | Exempt a member from inactivity reports |
+| `!unexemptinactivity @user` | Remove exemption |
+
+#### Verification (`cogs/verification.py`)
+
+| Command | Description |
+|---|---|
+| `!sendverification` | Post the LinkedIn verification embed with buttons in the current channel |
+| `!reverify @user` | Remove Member role, re-add Verification role, post prompt in `#verification` |
+| `!verifyall` | DM all unverified members and post verification prompt |
+| `!verificationstatus` | Show pending vs verified counts. Alias: `!vstatus` |
+
+#### Contests (`cogs/contests.py`)
 
 | Command | Description |
 |---|---|
 | `!contests` | List upcoming contests (next 7 days) from all platforms |
-| `!contestcheck` | Manually trigger the contest reminder check immediately |
+| `!contestcheck` | Manually trigger the contest reminder check now |
 
-#### Duels Admin — `cogs/duels.py`
-
-| Command | Arguments | Description |
-|---|---|---|
-| `!duelsetrank` | `@user <mode> <rating>` | Set a user's duel rating for a specific mode. Mode format: `cp_blitz`, `cp_duel`, `dsa_blitz`, `dsa_duel`, `icpc_blitz`, `icpc_duel` |
-
-#### Reset — `cogs/reset.py`
+#### Duels Admin (`cogs/duels.py` + `cogs/admin.py`)
 
 | Command | Arguments | Description |
 |---|---|---|
-| `!resetdaily` | — | Explains that the daily board resets automatically (non-destructive) |
-| `!resetweek` | — | Delete solve records for the current week (requires `yes` confirmation) |
-| `!resetmonth` | — | Delete monthly solve records, preserving the current week (requires `yes` confirmation) |
-| `!resetalltime` | — | **Nuclear** — permanently wipes all solve records. Requires typing `CONFIRM WIPE <username>` |
-| `!resetuser` | `@user [week\|all]` | Reset a single member's solves (current week or all-time) |
-| `!resetproblem` | `<db_id>` | Un-mark all solves for a specific problem so members can re-earn points |
-| `!resetweekfull` | — | Full reset: delete solves + problems + deactivate the week (requires `yes` confirmation) |
-| `!saferemove` | `<db_id>` | Remove a problem safely: instant if unsolved, confirmation required if already solved |
+| `!duelsetrank` | `@user <mode> <rating>` | Set a user's duel rating. Mode format: `cp_blitz`, `cp_duel`, `dsa_blitz`, `dsa_duel`, `icpc_blitz`, `icpc_duel` |
+| `!endduel` | `[duel_id]` | Without ID: lists active duels. With ID: force-cancels the match, no rating change. Alias: `!forceendduel` |
 
-#### Website Sync — `cogs/website_sync.py`
+#### Reset (`cogs/reset.py`)
 
 | Command | Arguments | Description |
 |---|---|---|
-| `!syncultimate` | — | Fetch and sync complete message history across all 14 configured channels |
-| `!syncall` | — | Sync the last 10 messages across all configured channels |
-| `!sync` | `<key>` | Sync the last 10 messages of a single channel by key name |
+| `!resetdaily` | | Explains daily resets automatically (non-destructive) |
+| `!resetweek` | | Delete solves for the current week (requires `yes` confirmation) |
+| `!resetmonth` | | Delete monthly solves only, weekly/daily untouched (requires `yes` confirmation) |
+| `!resetalltime` | | Nuclear: wipe all solves. Requires typing `CONFIRM WIPE <username>` |
+| `!resetuser` | `@user [week\|all]` | Reset a single member's solves |
+| `!resetproblem` | `<db_id>` | Un-mark all solves for one problem so members can re-earn points |
+| `!resetweekfull` | | Delete solves + problems + deactivate the week (requires `yes` confirmation) |
+| `!saferemove` | `<db_id>` | Instant remove if unsolved; shows solvers and asks `confirm` if already solved |
+
+#### Website Sync (`cogs/website_sync.py`)
+
+| Command | Arguments | Description |
+|---|---|---|
+| `!syncultimate` | | Sync complete message history for all 15 channels |
+| `!syncall` | | Sync last 10 messages across all channels |
+| `!sync` | `<key>` | Sync last 10 messages of one channel |
 | `!syncchannel` | `<key\|all> [limit]` | Sync up to `limit` messages for a channel or all channels |
-| `!syncstatus` | — | View row counts and last sync timestamp per channel |
+| `!syncprune` | | Prune `daily_problems` and `daily_editorials` messages older than 30 days |
+| `!syncstatus` | | Row counts and last sync timestamp per channel |
 
-#### Bot Configuration — `bot.py`
+#### Bot Configuration (`bot.py`)
 
 | Command | Arguments | Description |
 |---|---|---|
-| `!setcookie` | `<REVEL_SESSION value>` | Store the AtCoder session cookie for authenticated checks. The triggering message is auto-deleted immediately |
-| `!adminhelp` | — | Show the full admin command reference (hidden from non-admins) |
+| `!setcookie` | `<REVEL_SESSION value>` | Store AtCoder session cookie. Message auto-deleted after storing |
+| `!adminhelp` | | Full admin command reference (hidden from non-admins) |
+
+#### Database Maintenance (`cogs/admin.py`)
+
+| Command | Description |
+|---|---|
+| `!prunedaily` | Delete `daily_problems` and `daily_editorials` messages and threads older than 30 days. User solve history is 100% safe. Aliases: `!pruneold`, `!prune30d` |
+| `!prune_community` | Delete community forum threads and comments older than 15 days. Aliases: `!prune_community_posts`, `!prune_forum` |
 
 ---
 
-## Background Tasks & Automation
+## Background Tasks
 
 | Task | Schedule | Description |
 |---|---|---|
-| **Nightly auto-check** | 23:58 IST daily | Bulk-checks all members for today's problems, 2 seconds between members. Posts summary to `CHECKALL_CHANNEL_ID` if configured |
-| **6-hour auto-check** | Every 6 hours | Silent background solve award — awards points without posting any message |
-| **Week/Month-end announcement** | On exact last day of active week/month | Posts congratulations leaderboard to `LEADERBOARD_ANNOUNCE_CHANNEL_ID` and pings `LEADERBOARD_PING_ROLE_ID` |
-| **Inactivity report** | 09:00 IST on 15th/20th/25th/30th | Scans all members' last solve, categorizes 15–29/30–49/50+ days inactive, posts to `#inactivity-info` |
-| **Contest reminders** | Every 30 minutes | Fetches contests from CF/LC/CC/AtCoder, posts 12h and 1h warnings to `CONTEST_REMINDER_CHANNEL` |
-| **Duel auto-check** | Every 45 seconds | Scans all active duels for expired deadlines, auto-resolves blitz problems and finalizes duel matches |
-| **Website channel sync** | Every 1 hour | Mirrors last 10 messages from all 14 configured channels to Postgres |
-| **Guild snapshot** | Every 5 minutes | Updates `guild_snapshot` table with live member counts, boost tier, etc. |
-| **Contest API cache refresh** | Every 30 minutes (background) | Refreshes the contest API cache asynchronously; API responds instantly from memory |
+| Nightly auto-check | 23:58 IST daily | Bulk-checks all members for today's problems, 2 seconds between members. Posts summary to `CHECKALL_CHANNEL_ID` if configured |
+| 6-hour silent check | Every 6 hours | Awards points silently with no message posted |
+| Week/month-end announcement | On the exact last day of active week/month | Posts congratulations leaderboard to `LEADERBOARD_ANNOUNCE_CHANNEL_ID`, pings `LEADERBOARD_PING_ROLE_ID` |
+| Inactivity report | 09:00 IST on 15th, 20th, 25th, 30th of each month | Tiered report (15-29 / 30-49 / 50+ days) posted to `#inactivity-info`. No DMs, no kicks |
+| Contest reminders | Every 30 minutes | Posts 12h and 1h warnings to `#contest-reminder`. Fetches from CF/LC/CC/AtCoder + custom_contests |
+| Duel auto-check | Every 45 seconds | Scans active duels for expired deadlines, auto-resolves blitz problems and finalises duel matches |
+| Channel mirror sync | Every hour | Fetches last 10 messages from all 15 configured channels |
+| Guild snapshot | Every 5 minutes | Updates `guild_snapshot` with live member counts, boost tier, etc. |
+| Contest cache refresh | Every 30 minutes (background) | Refreshes the `/api/contests` cache asynchronously |
 
 ---
 
-## Duel System Deep Dive
+## Duel System
 
 ### Modes
 
-| Family | Match Type | Platform | Rating System |
+| Family | Format | Platform | Rating |
 |---|---|---|---|
-| `cp` | BLITZ | Codeforces | Elo (K=24) |
-| `cp` | DUEL | Codeforces | Elo (K=32) |
-| `dsa` | BLITZ | LeetCode | Fixed points (win +12, loss −6) |
-| `dsa` | DUEL | LeetCode | Fixed points (win +22, loss −12) |
-| `icpc` | BLITZ | Codeforces | Elo (K=40) |
-| `icpc` | DUEL | Codeforces | Elo (K=40) |
+| `cp` | BLITZ | Codeforces | Elo, K=24 |
+| `cp` | DUEL | Codeforces | Elo, K=32 |
+| `dsa` | BLITZ | LeetCode | Fixed (+12 win / -6 loss) |
+| `dsa` | DUEL | LeetCode | Fixed (+22 win / -12 loss) |
+| `icpc` | BLITZ | Codeforces | Elo, K=40 |
+| `icpc` | DUEL | Codeforces | Elo, K=40 |
 
 ### BLITZ Format
 
-- Problems are played one at a time, shared by both players.
-- Per-problem timers:
-  - 3-problem: 15 min (P1) / 25 min (P2) / 35 min (P3)
-  - 2-problem: 25 min (P1) / 25 min (P2)
-- First verified solver takes the problem for both.
-- Timer expires with no solve → draw on that problem → next problem.
-- Most problems won takes the match.
+Problems played one at a time, shared by both players. Per-problem timers scale with difficulty position:
+
+```
+3-problem format:  15 min (P1 easy) / 25 min (P2 medium) / 35 min (P3 hard)
+2-problem format:  25 min (P1) / 25 min (P2)
+```
+
+First verified solver takes the problem for both. Timer expires with no solve means a draw on that problem, then next problem. Most problems won takes the match.
 
 ### DUEL Format (ICPC-style)
 
-- One total timer: 20 minutes × number of problems (2 → 40 min, 3 → 60 min).
-- Players start on Problem 1 and unlock Problem N+1 only after their own verified solve of Problem N (delivered privately/ephemerally).
-- If a player finishes all problems early, the match ends immediately.
-- Scoring on time expiry: solve count wins; tie on count → lower total solve time wins; 0–0 or identical count + time → draw.
+One total timer: 20 minutes x number of problems. Players start on Problem 1 and unlock the next only after their own verified solve of the current one (delivered ephemerally). If a player finishes all problems early, the match ends immediately. On timer expiry: solve count wins; tie on count means lower total solve time wins; 0-0 or identical count and time means draw.
 
-### Problem Selection
-
-Target ratings are computed from the average of both players' ratings:
+### Problem Targets
 
 ```
-base = max(800, ceil(avg_rating / 100) * 100)
+base = max(800, ceil(avg_player_rating / 100) * 100)
 
-CF normal 3-problem:  [base−100, base+100, base+200]
-CF normal 2-problem:  [base, base+100]
-ICPC 3-problem:       [base, base+100, base+300]
-ICPC 2-problem:       [base+100, base+200]
-LC:                   [Easy, Medium, Hard]  (3-problem)
-LC:                   [Medium, Medium]      (2-problem)
+CF normal  3-problem:  [base-100, base+100, base+200]
+CF normal  2-problem:  [base, base+100]
+ICPC       3-problem:  [base, base+100, base+300]
+ICPC       2-problem:  [base+100, base+200]
+LC         3-problem:  [Easy, Medium, Hard]
+LC         2-problem:  [Medium, Medium]
 ```
 
-Pair history is tracked so the same problem is never served to the same pair twice.
+The CF problem pool is loaded once, cached for 6 hours. For each target rating, the picker tries exact match then widens by ±100, ±200, ±300, ±500, then falls back to closest-rated match in the pool. ICPC mode requires tags from both the math family and the algo family.
 
 ### Rating Tiers
 
@@ -946,68 +795,80 @@ Pair history is tracked so the same problem is never served to the same pair twi
 | Pupil | 1200 |
 | Newbie | 0 |
 
-### Forfeit Penalties
+### Forfeit / Force-end
 
-- **Forfeiter:** −32 rating, counted as a loss
-- **Winner (if human):** +16 rating, counted as a win
-- **Bot matches:** Elo penalty still applies
+Forfeiting applies proper Elo delta using the same K-factor as the mode (not a flat penalty). `!endduel` force-cancels with no rating change to either player.
 
 ### Match Channels
 
-Each match creates a private text channel under a `Duels` category:
-- Named `{family}-{kind}-{number}-{p1}-vs-{p2}`
-- @everyone can see the channel exists but cannot read history or send messages
+Each Discord match creates a private text channel under a `Duels` category:
+- Named `{family}-{kind}-{id}-{p1}-vs-{p2}`
+- `@everyone` can see the channel exists but cannot read or send
 - Only the two players and the bot have full access
 - Channel auto-deletes 10 seconds after the match finishes
 
 ---
 
+## AI Coach System
+
+Powered by Google Gemini via the free-tier REST API. Uses `gemini-2.5-flash` with automatic fallback to `gemini-1.5-flash`. Requires `GEMINI_API_KEY` in environment.
+
+| Command | What it does |
+|---|---|
+| `!coach [@user]` | Pulls the user's registered handles, solve history, and duel ratings from the DB. Builds a personalised training roadmap with weak area identification, recommended problem ratings, and a weekly grind plan |
+| `!hint <problem_id>` | Retrieves problem metadata (tags, rating, examples), generates progressive hints at three levels without ever showing code. Works for CF problem IDs (e.g. `1234A`) and LC slugs |
+| `!explain <topic>` | Produces a CP-focused explanation of a technique or algorithm with an annotated C++17 template and a list of representative problems |
+| `!review <code>` | Analyses pasted code for time and space complexity, TLE/MLE risk given typical CP constraints, and logical bugs, without rewriting the solution |
+
+---
+
 ## Environment Variables
 
-Copy `.env.example` to `.env` and fill in the values.
+Copy `.env.example` to `.env` and fill in your values. Never commit real values.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `DISCORD_TOKEN` | ✅ | — | Discord bot token |
-| `PREFIX` | — | `!` | Command prefix |
-| `ADMIN_ROLE` | — | `Admin` | Role name that grants admin commands |
-| `DATABASE_URL` | ✅ | — | Supabase PostgreSQL connection string |
-| `DATABASE_URL_CF` | — | `DATABASE_URL` | Neon PostgreSQL pool for CF problem cache |
-| `DATABASE_URL_LC` | — | — | Neon PostgreSQL pool for LC problem cache |
-| `PORT` | — | `10000` | HTTP API server port |
-| `RENDER_URL` | — | — | Public URL of the deployed service (for keepalive) |
-| `GUILD_ID` | ✅ | — | Discord server ID (used by the REST API for guild-scoped queries) |
-| `BB_API_KEY` | ✅ | — | Shared secret for `/api/internal/*` endpoints. Generate with `openssl rand -hex 32` |
-| `BB_ALLOWED_ORIGINS` | — | `http://localhost:5173,http://localhost:4000` | Comma-separated CORS origins |
-| `VERIFICATION_CHANNEL` | — | `verification` | Channel name for verification prompts |
-| `WELCOME_CHANNEL` | — | `general` | Channel name for welcome messages |
-| `LINKEDIN_URL` | — | — | LinkedIn page URL for verification |
-| `VERIFICATION_ROLE` | — | `Verification` | Role assigned while pending verification |
-| `MEMBER_ROLE` | — | `Member` | Role granted after verification |
-| `INACTIVITY_CHANNEL` | — | `inactivity-info` | Channel name for inactivity reports |
-| `INACTIVITY_CHANNEL_ID` | — | — | Channel ID (takes precedence over name) |
-| `CHECKALL_CHANNEL_ID` | — | — | Channel ID for nightly auto-check summary |
-| `LEADERBOARD_ANNOUNCE_CHANNEL_ID` | — | — | Channel ID for week/month-end leaderboard announcements |
-| `LEADERBOARD_PING_ROLE_ID` | — | — | Role ID to ping in period announcements |
-| `CONTEST_REMINDER_CHANNEL` | — | `contest-reminder` | Channel name for contest reminders |
-| `CONTEST_REMINDER_ROLE` | — | `everyone` | Role to ping in reminders (`everyone`, a role name, or blank) |
-| `DUEL_CP_DUEL_CHANNEL` | — | — | Channel ID or name for CP Duel match announcements |
-| `DUEL_CP_BLITZ_CHANNEL` | — | — | Channel ID or name for CP Blitz match announcements |
-| `DUEL_DSA_DUEL_CHANNEL` | — | — | Channel ID or name for DSA Duel match announcements |
-| `DUEL_DSA_BLITZ_CHANNEL` | — | — | Channel ID or name for DSA Blitz match announcements |
-| `DUEL_ICPC_DUEL_CHANNEL` | — | — | Channel ID or name for ICPC Duel match announcements |
-| `DUEL_ICPC_BLITZ_CHANNEL` | — | — | Channel ID or name for ICPC Blitz match announcements |
-| `BOT_STARTUP_DELAY` | — | `45` | Seconds to wait after starting the API before connecting to Discord |
-| `BOT_RETRY_DELAY` | — | `60` | Base seconds to wait on rate-limit before restarting. Doubles on each retry, capped at 600 |
-| `DISCORD_CLIENT_ID` | — | — | Discord OAuth2 application client ID |
-| `DISCORD_CLIENT_SECRET` | — | — | Discord OAuth2 application client secret |
-| `DISCORD_REDIRECT_URI` | — | — | OAuth2 redirect URI (must match Discord developer portal) |
+| `DISCORD_TOKEN` | yes | | Discord bot token |
+| `PREFIX` | | `!` | Command prefix |
+| `ADMIN_ROLE` | | `Admin` | Role name that grants admin commands |
+| `DATABASE_URL` | yes | | Supabase PostgreSQL connection string (pooler URL works) |
+| `DATABASE_URL_CF` | | `DATABASE_URL` | Neon pool for CF problem cache. Falls back to main DB if not set |
+| `DATABASE_URL_LC` | | | Neon pool for LC problem metadata |
+| `GEMINI_API_KEY` | | | Google Gemini API key for `!coach`, `!hint`, `!explain`, `!review` |
+| `PORT` | | `10000` | HTTP API server port |
+| `RENDER_URL` | | | Public URL for keepalive ping |
+| `GUILD_ID` | yes | | Discord server ID (used by the REST API for guild-scoped queries) |
+| `BB_API_KEY` | yes | | Shared secret for `/api/internal/*`. Generate: `openssl rand -hex 32` |
+| `BB_ALLOWED_ORIGINS` | | `http://localhost:5173,...` | Comma-separated CORS origins |
+| `VERIFICATION_CHANNEL` | | `verification` | Channel name for verification prompts |
+| `WELCOME_CHANNEL` | | `general` | Channel name for welcome messages |
+| `LINKEDIN_URL` | | | LinkedIn page URL used in the verification embed |
+| `VERIFICATION_ROLE` | | `Verification` | Role for pending verification state |
+| `MEMBER_ROLE` | | `Member` | Role granted after joining (auto-granted instantly on join) |
+| `INACTIVITY_CHANNEL` | | `inactivity-info` | Channel name for inactivity reports |
+| `INACTIVITY_CHANNEL_ID` | | | Channel ID (takes precedence over name) |
+| `CHECKALL_CHANNEL_ID` | | | Channel ID for nightly auto-check summary |
+| `LEADERBOARD_ANNOUNCE_CHANNEL_ID` | | | Channel ID for week/month-end announcements |
+| `LEADERBOARD_PING_ROLE_ID` | | | Role ID to ping in period announcements |
+| `CONTEST_REMINDER_CHANNEL` | | `contest-reminder` | Channel name for contest reminders |
+| `CONTEST_REMINDER_ROLE` | | `everyone` | Role to ping: `everyone`, a role name, or blank for no ping |
+| `DUEL_CP_DUEL_CHANNEL` | | | Channel ID/name for CP Duel match announcements |
+| `DUEL_CP_BLITZ_CHANNEL` | | | Channel ID/name for CP Blitz |
+| `DUEL_DSA_DUEL_CHANNEL` | | | Channel ID/name for DSA Duel |
+| `DUEL_DSA_BLITZ_CHANNEL` | | | Channel ID/name for DSA Blitz |
+| `DUEL_ICPC_DUEL_CHANNEL` | | | Channel ID/name for ICPC Duel |
+| `DUEL_ICPC_BLITZ_CHANNEL` | | | Channel ID/name for ICPC Blitz |
+| `BOT_STARTUP_DELAY` | | `45` | Seconds to wait after starting the API before connecting to Discord |
+| `BOT_RETRY_DELAY` | | `60` | Base seconds before restart on rate-limit. Doubles on each retry, capped at 600 |
+| `DISCORD_CLIENT_ID` | | | Discord OAuth2 application client ID |
+| `DISCORD_CLIENT_SECRET` | | | Discord OAuth2 application client secret |
+| `DISCORD_REDIRECT_URI` | | | OAuth2 redirect URI (must match Developer Portal) |
 
 ---
 
 ## Deployment (Render)
 
-The `render.yaml` manifest configures a single **web service** on Render.
+The `render.yaml` configures a single web service on Render.
 
 ```yaml
 services:
@@ -1024,31 +885,32 @@ services:
 **Steps:**
 
 1. Push the repository to GitHub.
-2. Create a new **Web Service** on [render.com](https://render.com) connected to the repo.
-3. Render will use `render.yaml` automatically.
-4. Add all required environment variables in the Render dashboard under **Environment**.
-5. Set `sync: false` vars (secrets) manually — they are intentionally not committed.
-6. Deploy. The health check at `/health` is used by Render to confirm the service is alive.
+2. Create a new Web Service on [render.com](https://render.com) connected to the repo.
+3. Render picks up `render.yaml` automatically.
+4. Set all required environment variables in the Render dashboard under Environment. Variables marked `sync: false` in `render.yaml` must be set manually.
+5. Deploy. Render uses `/health` to confirm the service is alive.
 
 **Startup sequence:**
-1. DB pool initialized.
-2. API server starts immediately on `PORT` (satisfies Render's port-open check).
-3. Bot waits `BOT_STARTUP_DELAY` seconds (default 45s) — prevents Discord 429 on cold start.
-4. All 13 cogs loaded.
-5. Discord gateway connection established.
-6. On 429 or network error: exponential backoff with `os.execv` process restart (doubles delay, max 600s).
+
+1. DB pool initialised (Supabase + CF Neon + LC Neon).
+2. API server starts immediately on `PORT`. Render's port-open check passes within seconds.
+3. Bot waits `BOT_STARTUP_DELAY` (default 45s) to avoid Discord 429 on cold start.
+4. All 14 cogs loaded.
+5. Discord gateway connected.
+6. On 429 or network error: exponential backoff via `os.execv` process restart. Delay doubles each time, capped at 600s.
 
 ---
 
 ## Local Setup
 
-> For a detailed step-by-step walkthrough covering Discord server configuration, role hierarchy, channel permissions, environment variables, and a first-run checklist, see the **[Complete Setup Guide →](SETUP_README.md)**.
+> For a detailed walkthrough covering Discord role hierarchy, channel permissions, and a first-run checklist, see the [Complete Setup Guide](SETUP_README.md).
 
 ### Prerequisites
 
 - Python 3.11+ (3.14 recommended)
 - A PostgreSQL database (Supabase free tier works)
 - A Discord application with a bot token
+- (Optional) A Google Gemini API key for the AI Coach commands
 
 ### Installation
 
@@ -1059,8 +921,8 @@ cd CP-Bot
 
 # 2. Create and activate a virtual environment
 python -m venv venv
-venv\Scripts\activate      # Windows
-# source venv/bin/activate  # macOS/Linux
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS/Linux
 
 # 3. Install dependencies
 pip install -r requirements.txt
@@ -1071,86 +933,172 @@ copy .env.example .env
 
 # 5. Initialise the database
 # Run database/schema.sql in your PostgreSQL client (Supabase SQL Editor, psql, etc.)
-# Then run the migration files in order:
+# Then run migrations in order:
 #   database/migrate_v1_to_v2.sql
 #   database/migration_duels.sql
 #   database/migration_v2_2.sql
 #   database/migration_website_sync.sql
+# community_threads, community_comments, custom_contests, and team_members
+# are created automatically at startup.
 
 # 6. Start the bot
 python bot.py
 ```
 
-The bot will:
-- Start the HTTP API on `http://localhost:10000`
-- Wait `BOT_STARTUP_DELAY` seconds
-- Connect to Discord
-- Load all cogs
-- Print `Logged in as <BotName> (ID: <ID>)`
+The bot prints `Logged in as <Name> (ID: <ID>)` when ready.
 
-### Invite the Bot
+### Required Discord Intents
 
-When creating the Discord application, enable the following **Intents** in the Developer Portal:
-- `MESSAGE CONTENT INTENT`
-- `SERVER MEMBERS INTENT`
-- `PRESENCE INTENT` (optional, for online count in guild snapshot)
+Enable in the Discord Developer Portal under Bot > Privileged Gateway Intents:
 
-**Required OAuth2 scopes:** `bot`, `applications.commands`
+- MESSAGE CONTENT INTENT
+- SERVER MEMBERS INTENT
 
-**Minimum bot permissions:** `Send Messages`, `Embed Links`, `Manage Webhooks`, `Manage Channels`, `Manage Roles`, `Read Message History`, `Add Reactions`, `View Channel`
+### Minimum Bot Permissions
+
+`Send Messages`, `Embed Links`, `Manage Webhooks`, `Manage Channels`, `Manage Roles`, `Read Message History`, `Add Reactions`, `View Channel`
 
 ---
 
 ## Version History
 
-### v13.0.1 (Current)
-- Updated README with Render deployment startup sequence, environment guide, and aligned Git version history.
+### v14.0.2 — Current (25 Aug 2026)
 
-### v13.0.0
-- Live Problem Statement API (`/api/problems/{key}/statement`) with direct Codeforces HTML scraper and LeetCode GraphQL `codeSnippets` integration.
-- Clean prompt headers in statement output and format superscript tags (`10^9`, `2^31`).
-- Scoped HuggingFace `sigcp/hardtests_problems` dataset fallback.
-- Sanitized Neon database connections to load strictly via environment variables.
+- 15-day community forum retention: `community_threads` and `community_comments` tables with cascading deletes.
+- `!prune_community` command (aliases `!prune_community_posts`, `!prune_forum`) deletes threads and comments older than 15 days.
+- DB deletion sync in `on_raw_message_delete` now also removes matching rows from `discord_threads`.
+- `!adminhelp` updated to show all current maintenance commands.
 
-### v12.2.0
-- OAuth Discord Gateway (`/api/discord/auth`, `/api/discord/callback`, `/api/user/session`).
-- Dynamic OAuth `redirect_uri` host matching for live deployment on `binarybeats.in`.
+### v14.0.1 (25 Aug 2026)
 
-### v12.1.0
-- Real-Time Session Sync engine and automated leaderboard API endpoints.
+- Fix editorial PDF sync filter in `cogs/website_sync.py`. PDFs were being missed on some thread syncs.
 
-### v12.0.0
-- Bot HTTP API Gateway (`api_server.py`) and Neon PostgreSQL multi-pool database sync.
+### v14.0.0 (25 Aug 2026)
 
-### v11.0.0
-- Webhook creation, real-time duels, auto-matchmaking, and declining system.
+- 15th channel `daily_problems` added to `SYNCED_CHANNELS`.
+- Thread sync for `daily_problems`: skips first prompt message, enforces 10 KB attachment limit on member uploads.
+- `!prunedaily` command (aliases `!pruneold`, `!prune30d`): removes `daily_problems` and `daily_editorials` messages and threads older than 30 days. User solve history 100% safe.
+- `!syncprune` added to `cogs/website_sync.py`.
+- `!adminhelp` split into two batches covering all 6 admin embed sections.
 
-### v10.0.0
-- Discord Embeddings and UI Design System overhaul.
+### v13.0.4 (24 Aug 2026)
 
-### v9.0.0
-- Automated Monthly & Weekly Leaderboards auto-broadcast on the last day of each period.
+- New cog `cogs/ai_agent.py` with `!coach`, `!hint`, `!explain`, `!review` powered by Google Gemini 2.5-flash.
+- `GEMINI_API_KEY` environment variable.
+- `!team` admin command persists team member cards to DB, served at `GET /api/team`.
+- `GET /api/announcements` reads `bot_config` rows with `announcement:` prefix.
+- Bot stats logging on startup.
+- Config aliases in `database/queries.py`.
 
-### v8.0.0
-- CP/DSA Duels & Blitz Arena System with Elo rating calculation, matchmaking pools, and private duel channels.
+### v13.0.3 (23 Aug 2026)
 
-### v7.0.0
-- Automated Contest Reminders and Neo TLE scheduler.
+- Resolve player display names in `GET /api/duels/live` and `GET /api/duels` match history. Previously returned raw discord IDs.
 
-### v6.0.0
-- User Verification, Inactivity Kick system, and AtCoder Engine integration.
+### v13.0.2 (23 Aug 2026)
 
-### v5.0.0
-- CodeChef Parser and Verification Suite.
+- Arena forfeit on browser unload: `POST /api/duels/forfeit` uses real Elo delta (same K-factor as Discord bot), not flat penalty.
+- Inline PDF viewer endpoint for daily editorials.
+- `!team` and `!newcontest` admin commands.
+- Contest fetch: custom contests from `custom_contests` table included in `/api/contests`.
 
-### v4.0.0
-- Multi-Platform Command Registry.
+### v13.0.1 (17 Aug 2026)
 
-### v3.0.0
-- Codeforces Engine and Problemset utilities.
+- README updated with Render deployment guide and version history.
 
-### v2.0.0
-- Database Schema V2 & Core Bot Integration.
+### v13.0.0 (17 Aug 2026)
 
-### v1.0.0
-- Initial CP Bot release: Codeforces + LeetCode solve tracking, daily/weekly leaderboards, and basic registration.
+- `GET /api/problems/{key}/statement` live problem statement API.
+- Multi-source fallback chain: Neon DB cache -> live CF/LC API -> CF HTML scraper -> Hugging Face HARDTESTS dataset.
+- `GET /api/internal/hardtests/{pid}` internal endpoint.
+- Neon PostgreSQL pools for CF and LC problem metadata.
+- `DATABASE_URL_CF` and `DATABASE_URL_LC` env vars.
+
+### v12.2.0 (17 Aug 2026)
+
+- Discord OAuth2 gateway: `/api/discord/login`, `/api/discord/callback`, `/api/discord/me`, `/api/discord/logout`.
+- `bb_user_session` cookie-based session.
+- `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_REDIRECT_URI` env vars.
+- Channel mirror sync improvements.
+
+### v12.1.0 (17 Aug 2026)
+
+- Real-time session sync.
+- Leaderboard engine improvements: `GET /api/leaderboard/points` and `GET /api/leaderboard/rating` serving the website.
+- `GET /api/modes` lists active duel modes from DB.
+
+### v12.0.0 (17 Aug 2026)
+
+- Bot REST API gateway (`api_server.py`) fully replaces `keep_alive.py`.
+- Neon PostgreSQL sync for problem cache.
+- `GET /api/users/{discord_id}` full profile endpoint.
+- `GET /api/guild` guild snapshot endpoint.
+- `GUILD_ID`, `BB_API_KEY`, `BB_ALLOWED_ORIGINS` env vars.
+- `POST /api/internal/membership` internal endpoint.
+
+### v11.0.0 (17 Aug 2026)
+
+- Webhooks and branded embeds throughout: `Z4s`, `Contest Reminder`, `Zodiac`, `Your Helper`.
+- Real-time duel broadcasting: private match channels created per match, animated ASCII countdown.
+- `POST /api/duels/create`, `POST /api/duels/verify` web arena endpoints.
+- `GET /api/duels/live` live match strip.
+
+### v10.0.0 (17 Aug 2026)
+
+- Full embed and UI design system overhaul across all cogs.
+- Branded `_brand()` helper used consistently.
+- `!help` / `!adminhelp` redesigned with ANSI art and structured sections.
+
+### v9.0.0 (17 Aug 2026)
+
+- Automated week-end and month-end leaderboard announcements.
+- `LEADERBOARD_ANNOUNCE_CHANNEL_ID` and `LEADERBOARD_PING_ROLE_ID` env vars.
+- `monthly_solves` table; `!resetmonth` scope-isolated from weekly data.
+
+### v8.0.0 (17 Aug 2026)
+
+- `cogs/duels.py`: 1v1 duel and blitz system with CP, DSA, ICPC families.
+- Bot opponent (Z4s) with sigmoid-calibrated timing model in `duel_bot_engine.py`.
+- Elo ratings and CF-style tiers in `duel_ranks.py`.
+- Pair history tracking to avoid repeated problems.
+- `duel_ratings`, `duels`, `duel_problems`, `pair_history` tables.
+- `DUEL_*_CHANNEL` env vars for mode-specific channel routing.
+
+### v7.0.0 (17 Aug 2026)
+
+- `cogs/contests.py`: contest reminders at 12h and 1h for CF, LC, CC, AtCoder.
+- `CONTEST_REMINDER_CHANNEL` and `CONTEST_REMINDER_ROLE` env vars.
+- `!contests` and `!contestcheck` commands.
+- `!adminhelp` is now separate from `!help`.
+- `!setcookie` for AtCoder REVEL_SESSION, message auto-deleted.
+
+### v6.0.0 (17 Aug 2026)
+
+- `cogs/verification.py`: Member role auto-granted on join. Zodiac webhook welcome in `#welcome`. DM onboarding guide. LinkedIn button flow for `!reverify`.
+- `cogs/inactivity.py`: tiered reports (15-29 / 30-49 / 50+ days) on 15/20/25/30 of each month. Posts to `#inactivity-info`. No auto-kick.
+- `VERIFICATION_CHANNEL`, `WELCOME_CHANNEL`, `LINKEDIN_URL`, `VERIFICATION_ROLE`, `MEMBER_ROLE`, `INACTIVITY_CHANNEL` env vars.
+
+### v5.0.0 (17 Aug 2026)
+
+- CodeChef platform adapter (`cogs/codechef.py`).
+- Multi-platform verification suite.
+
+### v4.0.0 (17 Aug 2026)
+
+- Multi-platform command registry. `!register`, `!unregister`, `!profile`, `!handles`.
+- AtCoder adapter with session-cookie auth.
+
+### v3.0.0 (17 Aug 2026)
+
+- Codeforces engine with bulk submission fetch and `CFBlockedError`.
+- CF problem pool for duels with 6-hour cache.
+
+### v2.0.0 (17 Aug 2026)
+
+- Database integration: asyncpg pools, Supabase.
+- `months` table and monthly leaderboard scope.
+- `point_adjustments` table and `!addpoints`, `!subpoints`, `!setmemberpoints`, `!pointlog`.
+- `DATABASE_URL` env var, PgBouncer-safe `statement_cache_size=0`.
+
+### v1.0.0 (24 Jun 2026)
+
+- Initial release: Codeforces + LeetCode solve tracking, daily/weekly leaderboards, `!check`, `!checkall`, basic registration.

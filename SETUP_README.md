@@ -1,685 +1,781 @@
-# CP-Bot v5 — Complete Setup Guide
+# CP-Bot v7 — Complete Setup Guide
 ### Binary Beats Discord Server
 
----
-
-## Pehle samjho — Kya kya add hua hai v5 mein?
-
-Tumhara existing CP-Bot (submission checker, points, leaderboard) bilkul waise hi kaam karta rahega. Usme koi change nahi hua. Sirf **2 naye features** add hue hain:
-
-| Feature | Kya karta hai | Kaunsi file |
-|---|---|---|
-| **Verification System** | Jab koi member server join kare, usse pehle LinkedIn follow karna padega tabhi server access milega | `cogs/verification.py` |
-| **Inactivity Tracker** | Jo member 15/20/25 din se koi problem solve nahi karta, use warnings milti hain. 30 din pe auto-kick | `cogs/inactivity.py` |
-
-Aur `config.py` aur `bot.py` update hue hain sirf inhe support karne ke liye.
+> This guide covers everything needed to run CP-Bot from scratch: Discord server configuration, role hierarchy, channel permissions, environment variables, database initialisation, and a first-run checklist.
 
 ---
 
-## PART 1: Files apne GitHub Repo mein daalo
+## Contents
 
-### Kya replace karna hai, kya naya add karna hai:
+1. [What's in the bot](#whats-in-the-bot)
+2. [Part 1 — Discord Server Setup](#part-1--discord-server-setup)
+3. [Part 2 — Environment Variables](#part-2--environment-variables)
+4. [Part 3 — Database Setup](#part-3--database-setup)
+5. [Part 4 — Deploy on Render](#part-4--deploy-on-render)
+6. [Part 5 — First-Run Commands](#part-5--first-run-commands)
+7. [Part 6 — Test Everything](#part-6--test-everything)
+8. [Admin Command Quick Reference](#admin-command-quick-reference)
+9. [Troubleshooting](#troubleshooting)
+
+---
+
+## What's in the bot
+
+| Feature | Cog |
+|---|---|
+| Handle registration, profile | `cogs/registry.py` |
+| Daily problem management | `cogs/problems.py` |
+| Solve checking (manual + auto) | `cogs/checker.py` |
+| Leaderboards (daily/weekly/monthly) | `cogs/leaderboard.py` |
+| Recent submissions | `cogs/submissions.py` |
+| Manual point adjustments | `cogs/points.py` |
+| Data reset commands | `cogs/reset.py` |
+| Member onboarding + LinkedIn flow | `cogs/verification.py` |
+| Inactivity reports (15/20/25/30) | `cogs/inactivity.py` |
+| Contest reminders (12h and 1h) | `cogs/contests.py` |
+| 1v1 duels (CP, DSA, ICPC) | `cogs/duels.py` |
+| Website channel mirror | `cogs/website_sync.py` |
+| AI CP Coach (Gemini) | `cogs/ai_agent.py` |
+| Server config, team, maintenance | `cogs/admin.py` |
+| REST API for website | `api_server.py` |
+
+---
+
+## Part 1 — Discord Server Setup
+
+All of this is done inside Discord before touching any code.
+
+---
+
+### Step 1.1 — Create the Required Roles
+
+Go to **Server Settings -> Roles** and create these two roles if they don't already exist.
+
+**Role: `Verification`**
+
+This is assigned to a member when they first join, before they complete the LinkedIn flow. Members with only this role cannot see any regular channels.
+
+- Name: `Verification` (capital V, rest lowercase)
+- Color: red or orange so admins can spot pending members easily
+- Permissions: none at all
+
+**Role: `Member`**
+
+This is the access role. A new member gets it instantly on join (the bot auto-grants it). The LinkedIn button flow exists for the manual `!reverify` case.
+
+- Name: `Member` (capital M)
+- Color: blue or green
+- Permissions: standard read/send access for regular channels
+
+**Bot role hierarchy (critical):**
+
+The bot's own role must be above both `Member` and `Verification` in the role list, otherwise it cannot assign or remove those roles.
 
 ```
-cp-bot/                          STATUS
-├── bot.py                   ←  REPLACE karo (2 nayi lines add hain)
-├── config.py                ←  REPLACE karo (nayi env variables hain)
-└── cogs/
-    ├── verification.py      ←  NAYA FILE hai, abhi exist nahi karta
-    └── inactivity.py        ←  NAYA FILE hai, abhi exist nahi karta
+Server Settings -> Roles
+
+Required order (top to bottom):
+  Admin
+  CP-Bot         <- drag to here
+  Member
+  Verification
+  @everyone
 ```
 
-**Baki sab files bilkul mat chhedna:**
-`checker.py`, `leaderboard.py`, `points.py`, `admin.py`, `problems.py`,
-`registry.py`, `reset.py`, `submissions.py`, `queries.py`, `schema.sql`,
-`connection.py` — ye sab unchanged hain, inhe touch nahi karna.
+Drag the CP-Bot role until it sits above Member and Verification, then save changes.
 
 ---
 
-## PART 2: Discord Server mein Setup karo
+### Step 1.2 — Channels to Create
 
-Ye sab Discord ke andar karna hai, code se pehle.
+These channels are expected by the bot. Create them if they don't exist.
 
----
+| Channel name | Purpose |
+|---|---|
+| `#verification` | Where the LinkedIn button embed is posted. New members who need manual reverify land here |
+| `#welcome` | Where the Zodiac webhook posts the welcome embed when a member joins |
+| `#inactivity-info` | Where inactivity reports are posted on 15/20/25/30 of each month |
+| `#contest-reminder` | Where contest reminder embeds are posted 12h and 1h before each contest |
 
-### Step 2.1 — 2 Naye Roles Banao
-
-Discord Server → Server Settings (gear icon) → Roles → "+ Create Role" pe click karo.
-
----
-
-**Role #1 — `Verification`**
-
-Ye role sirf ek kaam karta hai: jab koi naya member join kare, use ye role milta hai
-aur usse puri server ka access nahi hota jab tak wo LinkedIn follow na kare.
-
-- **Name:** `Verification` *(exactly aisa likhna — capital V, baki small)*
-- **Color:** Red ya Orange (taaki admins ko pata chale ye pending hai)
-- **Permissions:** Is role ko koi permissions mat dena — sab OFF raho
-- **Position:** Is role ki koi special position zaruri nahi — bas exist karna chahiye
+You can name them differently, but then you must set the corresponding env variables (`WELCOME_CHANNEL`, `INACTIVITY_CHANNEL`, etc.) to match.
 
 ---
 
-**Role #2 — `Member`**
+### Step 1.3 — Channel Permissions
 
-Ye role milta hai jab member LinkedIn follow karke verify ho jaata hai.
-Ye role hi decide karta hai ki member server ke channels dekh sakta hai ya nahi.
-
-- **Name:** `Member` *(exactly aisa — capital M)*
-- **Color:** Blue ya Green (verified member ka sign)
-- **Permissions:** Normal member jaisi permissions — Read messages, Send messages, etc.
-- **Position:** `@everyone` se upar hona chahiye
-
----
-
-**IMPORTANT — Bot Role ki Position:**
-
-```
-Server Settings → Roles
-
-Hierarchy kuch aisi honi chahiye:
-┌─────────────────────────┐
-│  Admin                  │  ← sabse upar
-│  CP-Bot                 │  ← BOT KA ROLE YAHAN HONA CHAHIYE
-│  Member                 │
-│  Verification           │
-│  @everyone              │  ← sabse neeche
-└─────────────────────────┘
-```
-
-CP-Bot ka role `Member` aur `Verification` dono se **UPAR** hona chahiye.
-Warna bot "Missing Permissions" error dega aur roles assign/remove nahi kar payega.
-
-Role ko drag karke upar le jaao → Save Changes.
-
----
-
-### Step 2.2 — Channels Setup
-
-Tumhare server mein ye channels hone chahiye. Kuch already honge, kuch naye banane padenge.
-
-| Channel | Kya karna hai | Status |
-|---|---|---|
-| `#verification` | Verification buttons yahan aate hain | Naya banao agar nahi hai |
-| `#welcome` | Verified member ka welcome message yahan aata hai + inactivity warnings bhi | Pehle se hai ya banao |
-
-**`#welcome` channel ke baare mein:** Tum ne bataya hai ki tumhare server mein `#general` nahi `#welcome` hai. Isliye `.env` mein hum `WELCOME_CHANNEL=welcome` likhenge. Inactivity ke public warnings bhi isi channel mein jaayenge.
-
----
-
-### Step 2.3 — Channel Permissions Sahi Karo
-
-Ye SABSE important step hai. Agar ye galat hua toh verification ka koi matlab nahi.
-
----
-
-**`#verification` Channel ki Permissions:**
-
-Is channel mein jaao → Settings (gear) → Permissions
+**`#verification`**
 
 ```
 @everyone
-  ✅ View Channel       ON  (join karte hi dikhe)
-  ❌ Send Messages      OFF (members khud type na kar paayein)
-  ❌ Add Reactions      OFF
+  View Channel:    ON   (so new members see it when they join)
+  Send Messages:   OFF
 
 Verification role
-  ✅ View Channel       ON  (pending members dikhe)
-  ❌ Send Messages      OFF
+  View Channel:    ON
+  Send Messages:   OFF
 
 Member role
-  ❌ View Channel       OFF (verified members ko ye channel dikhne ki zarurat nahi)
+  View Channel:    OFF  (verified members don't need to see this)
 
-CP-Bot (ya @bot role)
-  ✅ View Channel       ON
-  ✅ Send Messages      ON
-  ✅ Embed Links        ON
-  ✅ Manage Messages    ON
+CP-Bot role
+  View Channel:    ON
+  Send Messages:   ON
+  Embed Links:     ON
+  Manage Messages: ON
 ```
 
----
-
-**Baaki SAARE channels ki Permissions (general, cp-discussion, etc.):**
-
-Har channel mein ya Category level pe:
+**All other regular channels (apply at category level for convenience)**
 
 ```
 Verification role
-  ❌ View Channel       OFF  ← pending members ko kuch nahi dikhna chahiye
+  View Channel:    OFF  <- pending members see nothing
 
 Member role
-  ✅ View Channel       ON   ← verified members sab dekh saken
-  ✅ Send Messages      ON
+  View Channel:    ON
+  Send Messages:   ON
 ```
 
-> **Shortcut:** Agar tumhare channels categories mein hain, toh Category pe permission set karo,
-> sab channels automatically inherit kar lenge.
-
----
-
-**`#welcome` Channel ki Permissions:**
+**`#welcome`**
 
 ```
 @everyone
-  ✅ View Channel       ON   (sab dekh saken — welcome channel public hai)
-  ❌ Send Messages      OFF  (sirf bot bheje)
+  View Channel:    ON
+  Send Messages:   OFF
 
 Verification role
-  ✅ View Channel       ON   (naye members bhi dekh saken welcome messages)
+  View Channel:    ON   (new members should see welcome messages)
 
 Member role
-  ✅ View Channel       ON
-  ✅ Send Messages      ON   (members comment kar saken welcome pe)
+  View Channel:    ON
+  Send Messages:   ON
 
-CP-Bot
-  ✅ View Channel       ON
-  ✅ Send Messages      ON
-  ✅ Embed Links        ON
+CP-Bot role
+  View Channel:    ON
+  Send Messages:   ON
+  Embed Links:     ON
+  Manage Webhooks: ON   (needed for the Zodiac welcome webhook)
+```
+
+**`#contest-reminder` and `#inactivity-info`**
+
+Bot needs Send Messages, Embed Links, and Manage Webhooks.
+
+---
+
+### Step 1.4 — Bot Permissions in Discord Developer Portal
+
+Go to [discord.com/developers/applications](https://discord.com/developers/applications), select your application, go to the **Bot** tab.
+
+Under **Privileged Gateway Intents**, enable:
+
+```
+SERVER MEMBERS INTENT    <- required for on_member_join
+MESSAGE CONTENT INTENT   <- required for prefix commands
+```
+
+**Bot Permissions (OAuth2 invite or Server Settings -> Integrations):**
+
+```
+View Channels
+Send Messages
+Read Message History
+Embed Links
+Use External Emojis
+Attach Files
+Add Reactions
+Manage Roles          <- to grant/remove Member/Verification
+Manage Channels       <- to create/delete private duel channels
+Manage Webhooks       <- for Z4s, Contest Reminder, Zodiac, Your Helper webhooks
 ```
 
 ---
 
-### Step 2.4 — Bot Permissions (Discord Developer Portal)
+### Step 1.5 — Duel Channel Setup (Optional but Recommended)
 
-[discord.com/developers/applications](https://discord.com/developers/applications) pe jaao → Apna bot select karo → **Bot** tab
+The duel system creates a private text channel per match under a `Duels` category. You can optionally create dedicated announcement channels per mode so players know when a match starts.
 
-**Privileged Gateway Intents** section mein ye dono ON karo:
+Recommended structure:
 
 ```
-✅ SERVER MEMBERS INTENT    ← on_member_join ke liye zaroori
-✅ MESSAGE CONTENT INTENT   ← commands ke liye zaroori
+Category: Duels
+  #cp-duel-matches
+  #cp-blitz-matches
+  #dsa-duel-matches
+  #dsa-blitz-matches
+  #icpc-duel-matches
+  #icpc-blitz-matches
 ```
 
-Save karo.
+Then set the `DUEL_*_CHANNEL` env variables to those channel IDs. This is optional — if not set, the bot picks the first matching channel or the command's origin channel.
 
 ---
 
-**Server mein Bot Permissions:**
+## Part 2 — Environment Variables
 
-Agar bot invite karte waqt ye permissions nahi diye the, toh Server Settings → Integrations → CP-Bot → Permissions mein add karo:
+Create a `.env` file by copying `.env.example`:
 
-```
-✅ View Channels
-✅ Send Messages
-✅ Read Message History
-✅ Embed Links
-✅ Use External Emojis
-✅ Manage Roles          ← verification/member role assign karne ke liye
-✅ Kick Members          ← 30 day inactivity pe kick karne ke liye
+```bash
+copy .env.example .env
 ```
 
----
+Then fill in the values below. On Render, add these in the dashboard under **Environment**.
 
-## PART 3: .env File Update karo
-
-Apni `.env` file kholo (Render pe ho toh Dashboard → Environment Variables).
-
-Purani variables waise hi rakhni hain. Sirf **nayi lines ADD karo** neeche:
+### Required
 
 ```env
-# ════════════════════════════════════════════
-# EXISTING VARIABLES — CHANGE MAT KARO
-# ════════════════════════════════════════════
-DISCORD_TOKEN=your_token_here
-DATABASE_URL=your_supabase_url_here
-ADMIN_ROLE=Admin
+DISCORD_TOKEN=your_bot_token
+DATABASE_URL=postgresql://user:pass@host:port/dbname
+GUILD_ID=your_discord_server_id
+BB_API_KEY=generate_with_openssl_rand_hex_32
+```
+
+### Discord OAuth (for website login)
+
+```env
+DISCORD_CLIENT_ID=your_app_client_id
+DISCORD_CLIENT_SECRET=your_app_client_secret
+DISCORD_REDIRECT_URI=https://yoursite.com/api/discord/callback
+```
+
+### Database (optional, fall back to DATABASE_URL)
+
+```env
+DATABASE_URL_CF=neon_postgresql_url_for_cf_problem_cache
+DATABASE_URL_LC=neon_postgresql_url_for_lc_problem_metadata
+```
+
+### AI Coach
+
+```env
+GEMINI_API_KEY=your_google_gemini_api_key
+```
+
+Get one free at [aistudio.google.com](https://aistudio.google.com). Without this key, `!coach`, `!hint`, `!explain`, and `!review` will tell users the feature is not configured.
+
+### Bot Behaviour
+
+```env
 PREFIX=!
-RENDER_URL=https://your-bot-name.onrender.com
+ADMIN_ROLE=Admin
+BOT_STARTUP_DELAY=45
+BOT_RETRY_DELAY=60
 PORT=10000
+RENDER_URL=https://your-bot.onrender.com
+```
 
-# ════════════════════════════════════════════
-# NEW — Verification System
-# ════════════════════════════════════════════
+### Channels and Roles
 
-# Channel ka naam jahan verification message aata hai (# mat lagao)
+```env
 VERIFICATION_CHANNEL=verification
-
-# Channel ka naam jahan welcome message aata hai verified hone ke baad
-# Tumhare server mein #welcome hai, isliye "welcome" likho
 WELCOME_CHANNEL=welcome
-
-# Tumhara LinkedIn URL — member isko follow karenge
-# Company page: https://www.linkedin.com/company/binary-beats
-# Personal profile: https://www.linkedin.com/in/ashaygupta
-LINKEDIN_URL=https://www.linkedin.com/in/ashaygupta
-
-# Role ka naam jo naye member ko milta hai join hone pe (# nahi, # mat lagao)
+LINKEDIN_URL=https://www.linkedin.com/company/binarybeatshq
 VERIFICATION_ROLE=Verification
-
-# Role ka naam jo verify hone ke baad milta hai
 MEMBER_ROLE=Member
 
-# ════════════════════════════════════════════
-# NEW — Inactivity Tracker
-# ════════════════════════════════════════════
+INACTIVITY_CHANNEL=inactivity-info
+INACTIVITY_CHANNEL_ID=your_channel_id_here
 
-# Channel jahan public warnings + kick notifications jaate hain
-# Tumhare server mein #welcome hai, wahan jaayega
-INACTIVITY_CHANNEL=welcome
+CONTEST_REMINDER_CHANNEL=contest-reminder
+CONTEST_REMINDER_ROLE=everyone
 
-# true = 30 din ke baad auto kick hoga
-# false = sirf warnings, kick nahi (test karte waqt false karo)
-INACTIVITY_KICK_ENABLED=true
-
-# ════════════════════════════════════════════
-# OPTIONAL — Nightly Check Summary
-# ════════════════════════════════════════════
-# Agar chahte ho ki raat 23:58 wala auto-checkall ka summary
-# kisi channel mein aaye, toh us channel ka ID yahan daalo.
-# Channel ID kaise milega: channel pe right click → Copy Channel ID
-# CHECKALL_CHANNEL_ID=123456789012345678
+CHECKALL_CHANNEL_ID=your_channel_id_here
+LEADERBOARD_ANNOUNCE_CHANNEL_ID=your_channel_id_here
+LEADERBOARD_PING_ROLE_ID=your_role_id_here
 ```
 
-> **Note:** `.env` file mein spaces mat daalo `=` ke aage peeche.
-> `WELCOME_CHANNEL = welcome` galat hai, `WELCOME_CHANNEL=welcome` sahi hai.
+### Duel Channels (optional)
+
+```env
+DUEL_CP_DUEL_CHANNEL=channel_id_or_name
+DUEL_CP_BLITZ_CHANNEL=channel_id_or_name
+DUEL_DSA_DUEL_CHANNEL=channel_id_or_name
+DUEL_DSA_BLITZ_CHANNEL=channel_id_or_name
+DUEL_ICPC_DUEL_CHANNEL=channel_id_or_name
+DUEL_ICPC_BLITZ_CHANNEL=channel_id_or_name
+```
+
+### Website CORS
+
+```env
+BB_ALLOWED_ORIGINS=https://yoursite.com,https://www.yoursite.com,http://localhost:5173
+```
 
 ---
 
-## PART 4: Render pe Deploy karo
+## Part 3 — Database Setup
 
-1. GitHub pe saari nayi files push karo:
-   ```bash
-   git add .
-   git commit -m "v5: add verification and inactivity system"
-   git push
-   ```
+### 3.1 — Run the Base Schema
 
-2. Render Dashboard pe jaao → Apna service select karo → **Environment** tab
+In your Supabase SQL Editor (or any PostgreSQL client), run:
 
-3. Ye nayi variables add karo (ek ek karke):
-   - `VERIFICATION_CHANNEL` = `verification`
-   - `WELCOME_CHANNEL` = `welcome`
-   - `LINKEDIN_URL` = tumhara actual LinkedIn URL
-   - `VERIFICATION_ROLE` = `Verification`
-   - `MEMBER_ROLE` = `Member`
-   - `INACTIVITY_CHANNEL` = `welcome`
-   - `INACTIVITY_KICK_ENABLED` = `true`
+```
+database/schema.sql
+```
 
-4. **Manual Deploy** trigger karo: Render → Deployments → Deploy Latest Commit
+This creates: `users`, `handles`, `weeks`, `months`, `problems`, `solves`, `difficulty_points`, `point_adjustments`, `bot_config`.
 
-5. Logs mein dekho — ye lines aani chahiye:
-   ```
-   ✅  Database connected.
-      ✓  Loaded cogs.verification
-      ✓  Loaded cogs.inactivity
-   ✅  Inactivity daily check task started (09:00 IST).
-   ```
+All statements are `CREATE TABLE IF NOT EXISTS` so it's safe to re-run on an existing database.
+
+### 3.2 — Run Migrations in Order
+
+```
+database/migrate_v1_to_v2.sql
+database/migration_duels.sql
+database/migration_v2_2.sql
+database/migration_website_sync.sql
+```
+
+These add: duel tables (`duels`, `duel_problems`, `duel_ratings`, `pair_history`), `monthly_solves` table, and website sync tables (`discord_messages`, `discord_threads`, `guild_snapshot`).
+
+### 3.3 — Auto-created Tables
+
+The following tables are created automatically the first time the bot starts. You don't need to create them manually:
+
+- `community_threads` and `community_comments` — website forum
+- `custom_contests` — contests added via `!newcontest`
+- `team_members` — team roster from `!team`
+
+### 3.4 — Default Difficulty Points
+
+After first run, set your difficulty points if the defaults (easy=5, medium=10, hard=20, expert=35, master=50) don't suit your community:
+
+```
+!setpoints easy 5
+!setpoints medium 10
+!setpoints hard 20
+!setpoints expert 35
+!setpoints master 50
+```
 
 ---
 
-## PART 5: Bot Start hone ke baad — First Time Setup
+## Part 4 — Deploy on Render
+
+1. Push the repository to GitHub.
+2. Create a new **Web Service** on [render.com](https://render.com), connected to the repo.
+3. Render reads `render.yaml` automatically. Build command: `pip install -r requirements.txt`. Start command: `python -u bot.py`.
+4. Go to **Environment** in the Render dashboard and add all the variables from Part 2. Variables marked `sync: false` in `render.yaml` must be added manually.
+5. Click **Manual Deploy -> Deploy Latest Commit**.
+
+**Expected startup logs:**
+
+```
+[db] CF Neon DB pool initialized successfully.
+[db] LC Neon DB pool initialized successfully.
+Starting API server on port 10000...
+Startup cooldown: 45s ...
+Loading cogs...
+  cogs.registry
+  cogs.admin
+  ...
+  cogs.ai_agent
+Logged in as CP-Bot (ID: ...)
+```
+
+The API server starts immediately and responds to `/health` while the bot is still in its startup delay. This satisfies Render's health check.
 
 ---
 
-### Step 5.1 — Verification Message Post Karo
+## Part 5 — First-Run Commands
 
-`#verification` channel mein jaao aur type karo:
+Run these once after the bot is online.
+
+### 5.1 — Set Up the First Week
+
+```
+!setweek "Week 1" 2026-08-18 2026-08-24
+```
+
+Without an active week, `!check`, `!problems`, and `!leaderboard` all show "no active week" errors.
+
+### 5.2 — Set Up the Current Month
+
+```
+!setmonth "August 2026" 2026-08-01 2026-08-31
+```
+
+### 5.3 — Add Today's Problems
+
+```
+!addproblem cf 1234A easy 2026-08-18
+!addproblem lc two-sum medium 2026-08-18
+```
+
+Date must fall within the active week's range.
+
+### 5.4 — Post the Verification Embed
+
+In your `#verification` channel:
+
 ```
 !sendverification
 ```
 
-Bot ek embed post karega jisme 2 buttons honge:
-- `Follow on LinkedIn 🔗` — click karne pe LinkedIn page khulega
-- `I Have Followed ✅` — click karne pe verify ho jaayenge
+This posts the persistent LinkedIn button embed. The buttons keep working after bot restarts.
 
-Ye message **permanent** hai — bot restart hone ke baad bhi button kaam karta rahega.
-
----
-
-### Step 5.2 — Existing Members ko Verify Karo
-
-Tumhare server mein jo members pehle se hain, unhe bhi LinkedIn follow karne ke liye bolna hai.
-Iske liye ek hi command hai:
+### 5.5 — Send Verification DMs to Existing Members
 
 ```
 !verifyall
 ```
 
-Ye command:
-- Server ke **har member** ko check karta hai jo abhi `Member` role ke bina hai
-- Unhe automatically `Verification` role assign karta hai
-- Har member ko **DM** bhejta hai jisme likha hota hai ki `#verification` mein jaao
-  aur LinkedIn follow karo
-- Agar kisi ka DM band hai, toh woh `#verification` channel pe jaake khud verify kar
-  sakta hai (message wahan already hoga `!sendverification` se)
-- End mein admin ko report deta hai — kitne DMs gaye, kitne failed
+This sends DMs to all members who don't yet have the Member role, and re-posts the verification embed in `#verification`. Members with DMs closed still see the channel embed.
+
+### 5.6 — Set AtCoder Session Cookie
+
+If you want AtCoder checking to work reliably (the bot uses a logged-in session):
+
+```
+!setcookie YOUR_REVEL_SESSION_COOKIE_VALUE
+```
+
+Your message is auto-deleted immediately after the value is stored.
+
+### 5.7 — Do an Initial Channel Sync
+
+If you want your existing channel history mirrored to the website:
+
+```
+!syncultimate
+```
+
+This fetches complete history for all 15 configured channels. Use `!syncall` for just the last 10 messages.
 
 ---
 
-### Step 5.3 — Inactivity Check Test Karo
+## Part 6 — Test Everything
 
-Pehle dekho ki kaun kaun inactive hai:
-```
-!inactivity
-```
+### Verification Flow
 
-Bot color-coded report dega:
-- 🔴 Red = 25+ din inactive (kick ke kareeb)
-- 🟠 Orange = 20-24 din inactive
-- 🟡 Yellow = 15-19 din inactive
-- 🟢 Green = 15 din se kam (active)
+1. Have a second account join the server (or ask someone).
+2. They should only see `#verification`.
+3. They click **Follow on LinkedIn**, the LinkedIn page opens.
+4. They click **I Have Followed**.
+5. The Verification role is removed, Member role is added.
+6. `#welcome` shows the Zodiac webhook welcome embed.
+7. They receive a DM with the onboarding guide.
 
-Abhi manually trigger karna ho toh:
+### Solve Check
+
+1. Register a handle: `!register cf tourist`
+2. Run: `!check`
+3. If you have an accepted submission for today's assigned CF problem, you get points.
+
+### Inactivity Report
+
 ```
 !inactivitycheck
 ```
 
-Ye abhi warnings/kicks fire karega as per thresholds. Normal usage mein ye automatically
-roz 09:00 IST pe hota hai.
+This runs the full report immediately and posts it to `#inactivity-info`. Check the three tiers (15-29, 30-49, 50+ days) show correctly.
+
+### Contest Reminders
+
+```
+!contestcheck
+```
+
+Triggers the reminder check immediately. If any contests are within 12h or 1h, reminders are posted to `#contest-reminder`.
+
+### Duel Test
+
+```
+!duel @someone cp
+```
+
+If they don't accept within the timeout (around 15 seconds), you get auto-matched against the Z4s bot opponent.
+
+### AI Coach Test
+
+```
+!coach
+!explain binary search
+!hint 1234A
+```
+
+If `GEMINI_API_KEY` is not set, you get a clear error message. If it is set, you get a Gemini-powered response.
 
 ---
 
-### Step 5.4 — Test karo ki sab kaam kar raha hai
+## Admin Command Quick Reference
 
-**Verification test:**
-1. Server pe ek doosre account se join karo (ya kisi dost se join karwao)
-2. Unhe sirf `#verification` channel dikhna chahiye — aur kuch nahi
-3. `#verification` mein bot ka message aur dono buttons honge
-4. "Follow on LinkedIn" click karo — LinkedIn page khuleg
-5. Wapas aao, "I Have Followed ✅" click karo
-6. Verification role hatna chahiye, Member role milna chahiye
-7. `#welcome` mein welcome embed aana chahiye
-
-**Inactivity test (optional):**
-```
-!exemptinactivity @tumhara_account
-```
-Phir `!inactivitycheck` chalao — tumhara account skip hoga, baaki sab check honge.
-
----
-
-## Poora Flow Samjho
-
-### Verification Flow:
+### Periods
 
 ```
-Naya member server join karta hai
-            │
-            ▼
-Bot automatically "Verification" role assign karta hai
-Bot #verification mein embed post karta hai member ko mention karke:
-  ┌─────────────────────────────────────────┐
-  │  🔐 Verify to Join the Server           │
-  │                                         │
-  │  [Follow on LinkedIn 🔗] [I Have Followed ✅] │
-  └─────────────────────────────────────────┘
-            │
-            ▼
-Member "Follow on LinkedIn 🔗" click karta hai
-→ LinkedIn page browser mein khulta hai
-→ Member follow karta hai
-            │
-            ▼
-Member wapas Discord pe aata hai
-"I Have Followed ✅" button click karta hai
-            │
-            ▼
-Bot check karta hai:
-  - Agar already Member role hai → "Already verified!" message (sirf usse dikhta hai)
-  - Agar nahi hai → roles update karta hai
-            │
-            ▼
-Bot "Verification" role REMOVE karta hai
-Bot "Member" role ADD karta hai
-Member ko poora server access mil jaata hai
-            │
-            ▼
-#welcome mein public welcome embed aata hai:
-  "🎉 Welcome @member to Binary Beats! 🏆
-   They've followed us on LinkedIn and are ready to grind! 💪"
+!setweek "Week 1" 2026-08-18 2026-08-24
+!setmonth "August 2026" 2026-08-01 2026-08-31
+!currentweek
 ```
 
----
-
-### Inactivity Flow:
+### Problems
 
 ```
-Roz 09:00 IST pe bot automatically check karta hai
-            │
-            ▼
-Har registered member ka last solve check hota hai
-(registered = jisne !register cf/lc/cc karke handle link kiya ho)
-            │
-            ├── Last solve 15-19 din pehle?
-            │     └── DM bhejta hai: "Hey! 15 din ho gaye, kuch solve karo"
-            │
-            ├── Last solve 20-24 din pehle?
-            │     └── DM bhejta hai: "Warning #2 — X din mein kick ho jaoge"
-            │
-            ├── Last solve 25-29 din pehle?
-            │     ├── DM bhejta hai: "FINAL WARNING — X din mein kick"
-            │     └── #welcome mein public mention karta hai
-            │
-            └── Last solve 30+ din pehle (ya kabhi solve nahi kiya)?
-                  ├── Member ko DM karta hai: "Tumhe remove kiya ja raha hai"
-                  ├── Member ko kick karta hai
-                  └── #welcome mein kick log embed post karta hai
+!addproblem cf 1234A hard 2026-08-18
+!addproblem lc two-sum medium 2026-08-18 7   (custom 7 pts)
+!rius 42                                      (remove problem if unsolved)
+!removeproblem 42 no                          (remove + delete solve records)
+!setdifficulty 42 expert
 ```
 
-**Activity kya count hoti hai?**
-Sirf `!check` ya `!checkall` ke baad jo solves DB mein record hote hain — wahi activity hai.
-Discord pe online rehna ya message karna activity nahi count hota.
+### Solve Checking
 
-**Kisi ko exempt karna hai temporarily?**
 ```
-!exemptinactivity @username
+!check              (member-facing, 3/day rate limit)
+!checkall           (admin, requires Administrator permission)
 ```
-Woh member skip hoga inactivity check mein.
-*(Note: Bot restart pe exemption reset hoti hai — permanent ke liye README ke end mein SQL dekho)*
 
----
+### Leaderboards
 
-## Admin Commands — Quick Reference Card
+```
+!leaderboard        (member-facing, shows top 3 in each scope)
+!lbfull daily       (admin, full paginated list)
+!lbfull weekly
+!lbfull monthly
+```
 
-### Verification Commands
+### Points
+
+```
+!addpoints @user 10 Bonus for contest participation
+!subpoints @user 5 Late submission
+!setmemberpoints @user 50 Override
+!pointlog @user
+```
+
+### Verification
+
 ```
 !sendverification
-    → #verification mein verification embed + buttons post karta hai
-    → Pehli baar setup ke baad chalao, ya agar message delete ho jaaye
-
+!reverify @user
 !verifyall
-    → Server ke SAARE unverified members ko DM karta hai
-    → Unhe Verification role assign karta hai
-    → Pehli baar run karo existing members ke liye
-    → Safe hai multiple times chalane pe
-
-!reverify @username
-    → Kisi specific member ko wapas verification pe bhejta hai
-    → Member role remove karta hai, Verification role deta hai
-    → #verification mein unhe mention karta hai
-    → Use case: kisi ne LinkedIn unfollow kiya to reverify karo
-
 !verificationstatus
-    → Batata hai kitne members abhi pending hain (Verification role ke saath)
-    → Kitne verified hain (Member role ke saath)
 ```
 
-### Inactivity Commands
+### Inactivity
+
 ```
 !inactivity
-    → Full color-coded report — har member ka last solve date aur days count
-    → 🔴 25+ din, 🟠 20-24 din, 🟡 15-19 din, 🟢 active
-
 !inactivitycheck
-    → ABHI warnings aur kicks fire karo — daily 09:00 IST ka wait mat karo
-    → Test karne ke liye useful
+!exemptinactivity @user
+!unexemptinactivity @user
+```
 
-!exemptinactivity @username
-    → Is member ko inactivity check se permanently skip karo
-    → Admins, active contributors ke liye use karo
-    → Bot restart pe reset ho jaata hai
+### Contests and Team
 
-!unexemptinactivity @username
-    → Exemption hatao, member phir se normal check mein aayega
+```
+!newcontest "Binary Beats Grand Contest 1" https://codeforces.com/contest/1234 2026-08-20T18:00
+!team "Jane Doe" "Dev Lead" https://linkedin.com/in/janedoe https://github.com/janedoe
+!updatestats 11 2 500
+```
+
+### Duels
+
+```
+!duelsetrank @user cp_duel 1400
+!endduel                  (list active duels)
+!endduel 42               (force-cancel duel 42, no rating change)
+```
+
+### Resets
+
+```
+!resetdaily            (informational, daily is auto)
+!resetweek             (requires yes confirmation)
+!resetmonth            (requires yes confirmation)
+!resetalltime          (requires typing CONFIRM WIPE username)
+!resetuser @user week
+!resetproblem 42
+!resetweekfull         (requires yes confirmation)
+!saferemove 42
+```
+
+### Website Sync
+
+```
+!syncultimate          (full history, run once on setup)
+!syncall               (last 10 messages, all channels)
+!sync daily_editorials (last 10 messages, one channel)
+!syncchannel daily_problems 500
+!syncstatus
+!syncprune             (30-day prune for daily_problems and daily_editorials)
+```
+
+### Database Maintenance
+
+```
+!prunedaily            (remove daily problem records older than 30 days)
+!prune_community       (remove forum threads older than 15 days)
+```
+
+### Bot Config
+
+```
+!setcookie REVEL_SESSION_VALUE   (message auto-deleted)
+!adminhelp                        (full admin reference in Discord)
 ```
 
 ---
 
 ## Troubleshooting
 
-### "Role 'Member' not found" ya "Role 'Verification' not found" error
-**Cause:** `.env` mein jo naam likha hai woh server ke role naam se bilkul match nahi karta.
-**Fix:** Server Settings → Roles mein exact naam dekho. Case-sensitive hai — `member` aur `Member` alag hain.
-Phir `.env` update karo: `MEMBER_ROLE=Member` (exactly jaisa server mein hai).
+**"Role 'Member' not found" or "Role 'Verification' not found"**
+
+The role name in `.env` must match the server role name exactly, including capitalisation. `Member` and `member` are different. Check `MEMBER_ROLE` and `VERIFICATION_ROLE` in your env.
+
+**Bot cannot assign or remove roles — Missing Permissions**
+
+The bot's role must be above Member and Verification in the role hierarchy. Go to Server Settings -> Roles and drag the CP-Bot role above both.
+
+**Verification buttons do nothing after bot restart**
+
+The bot registers the persistent view on startup. Try restarting the bot and clicking again. If the issue persists, run `!sendverification` again to post a fresh embed.
+
+**New members can see all channels when they should only see `#verification`**
+
+The Verification role is missing `View Channel: OFF` on those channels or categories. Set it at the category level so all child channels inherit it.
+
+**`!checkall` gives "You need administrator permission"**
+
+This command requires the Discord Administrator permission, not just the admin role. Grant Administrator to the user, or use a bot admin account.
+
+**CF checks fail or show "Codeforces temporarily unavailable"**
+
+Codeforces is rate-limiting the bot. The bot uses one bulk fetch per user and backs off entirely when blocked. Wait a few minutes and run `!check` again. Do not run `!checkall` repeatedly — it makes the block worse.
+
+**AtCoder checks always fail**
+
+Set the REVEL_SESSION cookie: `!setcookie your_cookie_value`. Get the cookie by logging into atcoder.jp and copying the `REVEL_SESSION` cookie from browser dev tools.
+
+**AI Coach commands say "GEMINI_API_KEY not configured"**
+
+Add `GEMINI_API_KEY=your_key` to your environment and restart the bot. Get a free key at [aistudio.google.com](https://aistudio.google.com).
+
+**Inactivity reports are not posting**
+
+The report only runs on the 15th, 20th, 25th, and 30th of each month at 09:00 IST. Run `!inactivitycheck` to trigger it immediately for testing. Confirm `INACTIVITY_CHANNEL_ID` or `INACTIVITY_CHANNEL` is set correctly.
+
+**Contest reminders are not posting**
+
+Check `CONTEST_REMINDER_CHANNEL` is set to the correct channel name. Run `!contestcheck` to trigger a check immediately. The reminder only fires when a contest is within 12h or 1h of its start time.
+
+**`!problems` shows "No active week"**
+
+Run `!setweek "Week 1" YYYY-MM-DD YYYY-MM-DD` to create one. The start and end dates must use the format `YYYY-MM-DD`.
+
+**Bot keeps restarting on Render**
+
+Check the logs for the restart reason. Common causes: invalid `DISCORD_TOKEN`, `DATABASE_URL` connection error, or missing required env variable. The bot uses exponential backoff for Discord 429 errors — it will recover on its own. For DB errors, check the Supabase connection string and that the database is active.
+
+**Website shows no data from the bot**
+
+Confirm `GUILD_ID` matches your Discord server ID. Run `!syncultimate` to populate the channel mirror tables. Confirm the `BB_API_KEY` in the bot's env matches the key in the website's server env.
+
+**Duel match channel not deleted after match ends**
+
+The channel auto-deletes 10 seconds after the match finishes. If the bot was offline when the match ended, the channel stays. Use `!endduel <id>` to force-cancel and the channel will be cleaned up.
 
 ---
 
-### Bot role assign/remove nahi kar pa raha — "Missing Permissions" error
-**Cause:** Bot ka role hierarchy mein Member/Verification role se neeche hai.
-**Fix:** Server Settings → Roles → CP-Bot ka role drag karke Member aur Verification dono se UPAR le jaao → Save.
-
----
-
-### Verification button click karne pe kuch nahi hota
-**Cause 1:** Bot offline hai ya restart hua — persistent view re-register nahi hui.
-**Fix:** Bot ko restart karo. Phir se try karo button.
-
-**Cause 2:** Bot ke paas Manage Roles permission nahi hai.
-**Fix:** Server Settings → Integrations → CP-Bot → Manage Roles ON karo.
-
----
-
-### Naye member ko `#verification` ke alawa aur channels dikh rahe hain
-**Cause:** Verification role ko us channel mein "View Channel: OFF" set nahi kiya.
-**Fix:** Har channel (ya category) pe jaao → Permissions → Verification role → View Channel: OFF.
-
----
-
-### `!verifyall` ne DMs send ki lekin members ke paas DMs band hain
-**Cause:** Discord users apne DMs band kar sakte hain.
-**Fix:** Ye normal hai. Bot report mein "DMs failed" count dikhata hai.
-In members ke liye `#verification` channel ka message enough hai — woh wahan jaake verify kar sakte hain.
-
----
-
-### Inactivity check chal nahi raha / warnings nahi aa rahi
-**Cause 1:** Member ne `!register` se apna handle link nahi kiya — unregistered members check nahi hote.
-**Fix:** Members ko `!register cf theirhandle` karne ko kaho.
-
-**Cause 2:** Bot recently restart hua aur 09:00 IST abhi tak nahi aaya.
-**Fix:** `!inactivitycheck` manually chalao.
-
-**Cause 3:** Render pe environment variables set nahi hain.
-**Fix:** Render Dashboard → Environment mein check karo.
-
----
-
-### Bot kick nahi kar pa raha
-**Cause:** "Kick Members" permission bot ke paas nahi hai.
-**Fix:** Server Settings → Integrations → CP-Bot → Kick Members: ON.
-
----
-
-### `#welcome` mein messages nahi aa rahe (welcome ya inactivity warnings)
-**Cause:** `.env` mein `WELCOME_CHANNEL` aur `INACTIVITY_CHANNEL` galat set hai.
-**Fix:** Dono ko `welcome` set karo (without #):
-```
-WELCOME_CHANNEL=welcome
-INACTIVITY_CHANNEL=welcome
-```
-Render pe update karo aur redeploy karo.
-
----
-
-## Optional: Permanent Inactivity Exemptions (Database mein store karo)
-
-Abhi exemptions in-memory hain — bot restart hone pe reset ho jaati hain.
-Agar permanent chahiye, toh Supabase SQL Editor mein ye run karo:
-
-```sql
-CREATE TABLE IF NOT EXISTS inactivity_exemptions (
-    discord_id  TEXT NOT NULL,
-    guild_id    TEXT NOT NULL,
-    exempted_by TEXT NOT NULL,
-    reason      TEXT,
-    created_at  TIMESTAMPTZ DEFAULT NOW(),
-    PRIMARY KEY (discord_id, guild_id)
-);
-```
-
-Phir `cogs/inactivity.py` mein `__init__` mein DB se exemptions load karo aur
-`!exemptinactivity` command mein DB mein save karo. Yeh v6 enhancement hai.
-
----
-
-## Complete File Structure
+## Complete File Structure (v7)
 
 ```
-cp-bot/
-│
-├── bot.py                ← v5 UPDATED — verification + inactivity cogs add hue
-├── config.py             ← v5 UPDATED — nayi env variables add huin
-├── keep_alive.py            unchanged
-├── ping.py                  unchanged
-├── render.yaml              unchanged
-├── requirements.txt         unchanged
-│
-├── cogs/
-│   ├── admin.py             unchanged
-│   ├── checker.py           unchanged
-│   ├── leaderboard.py       unchanged
-│   ├── points.py            unchanged
-│   ├── problems.py          unchanged
-│   ├── registry.py          unchanged
-│   ├── reset.py             unchanged
-│   ├── submissions.py       unchanged
-│   ├── verification.py   ← v5 NEW — LinkedIn verification system
-│   └── inactivity.py     ← v5 NEW — 15/20/25 day warnings + 30 day kick
-│
-├── database/
-│   ├── connection.py        unchanged
-│   ├── queries.py           unchanged
-│   └── schema.sql           unchanged — no new tables needed
-│
-└── platforms/
-    ├── base.py              unchanged
-    ├── atcoder.py           unchanged
-    ├── codechef.py          unchanged
-    ├── codeforces.py        unchanged
-    └── leetcode.py          unchanged
+CP-Bot/
++-- bot.py                    v7 entry point, 14 cogs, startup logic
++-- config.py                 all env vars and constants
++-- api_server.py             50+ REST API endpoints
++-- duel_bot_engine.py        bot opponent (sigmoid timing model)
++-- duel_ranks.py             Newbie -> LGM tier definitions
++-- keep_alive.py             legacy health server (kept as fallback)
++-- ping.py                   health ping utility
++-- requirements.txt
++-- render.yaml
+|
++-- cogs/
+|    +-- admin.py             period config, contests, team, maintenance
+|    +-- ai_agent.py          NEW: Gemini AI Coach
+|    +-- checker.py           !check, !checkall, nightly tasks
+|    +-- contests.py          12h/1h reminders, custom contests
+|    +-- duels.py             1v1 system, 6 modes, bot opponent
+|    +-- inactivity.py        tiered reports on 15/20/25/30
+|    +-- leaderboard.py       daily/weekly/monthly boards
+|    +-- points.py            manual point adjustments
+|    +-- problems.py          daily problem management
+|    +-- registry.py          handle registration, profile
+|    +-- reset.py             scoped and targeted resets
+|    +-- submissions.py       recent submissions view
+|    +-- verification.py      auto-join, LinkedIn flow, reverify
+|    +-- website_sync.py      15-channel mirror, hourly sync
+|
++-- database/
+|    +-- connection.py        3 asyncpg pools, auto-creates tables
+|    +-- queries.py           core queries
+|    +-- duel_queries.py      duel-specific queries
+|    +-- schema.sql           base schema (run once)
+|    +-- migrate_v1_to_v2.sql
+|    +-- migration_duels.sql
+|    +-- migration_v2_2.sql
+|    +-- migration_website_sync.sql
+|
++-- platforms/
+     +-- base.py              abstract adapter
+     +-- codeforces.py        bulk fetch, CFBlockedError
+     +-- leetcode.py          GraphQL check
+     +-- codechef.py          public API check
+     +-- atcoder.py           session-cookie check
+     +-- duel_cf_pool.py      CF problem pool, 6h cache
+     +-- duel_lc_pool.py      LC problem sequencer
 ```
 
 ---
 
-## Quick Checklist — Sab kar liya?
+## First-Run Checklist
 
 ```
-Discord Server Setup:
-  [ ] "Verification" role banaya
-  [ ] "Member" role banaya
-  [ ] CP-Bot role dono se upar hai hierarchy mein
-  [ ] #verification channel banaya
-  [ ] #verification channel permissions set ki (Verification role = view only, Member role = OFF)
-  [ ] Baaki channels mein Verification role = View Channel: OFF
-  [ ] Server Members Intent ON hai Discord Dev Portal mein
-  [ ] Message Content Intent ON hai Discord Dev Portal mein
-  [ ] Bot ke paas Manage Roles permission hai
-  [ ] Bot ke paas Kick Members permission hai
+Discord Server:
+  [ ] "Verification" role created
+  [ ] "Member" role created
+  [ ] CP-Bot role is above both in role hierarchy
+  [ ] #verification channel created, permissions set
+  [ ] #welcome channel permissions set
+  [ ] #inactivity-info channel created
+  [ ] #contest-reminder channel created
+  [ ] All regular channels/categories: Verification role = View Channel OFF
+  [ ] SERVER MEMBERS INTENT enabled in Developer Portal
+  [ ] MESSAGE CONTENT INTENT enabled in Developer Portal
+  [ ] Bot has Manage Roles permission
+  [ ] Bot has Manage Webhooks permission
+  [ ] Bot has Manage Channels permission
 
-.env / Render Environment Variables:
-  [ ] VERIFICATION_CHANNEL=verification
-  [ ] WELCOME_CHANNEL=welcome
-  [ ] LINKEDIN_URL=tumhara actual URL
-  [ ] VERIFICATION_ROLE=Verification
-  [ ] MEMBER_ROLE=Member
-  [ ] INACTIVITY_CHANNEL=welcome
-  [ ] INACTIVITY_KICK_ENABLED=true
+Environment Variables:
+  [ ] DISCORD_TOKEN set
+  [ ] DATABASE_URL set
+  [ ] GUILD_ID set
+  [ ] BB_API_KEY set (openssl rand -hex 32)
+  [ ] GEMINI_API_KEY set (optional, for AI Coach)
+  [ ] VERIFICATION_CHANNEL, WELCOME_CHANNEL, MEMBER_ROLE set
+  [ ] INACTIVITY_CHANNEL_ID or INACTIVITY_CHANNEL set
+  [ ] CONTEST_REMINDER_CHANNEL set
 
-Files:
-  [ ] bot.py replace kiya
-  [ ] config.py replace kiya
-  [ ] cogs/verification.py add kiya
-  [ ] cogs/inactivity.py add kiya
-  [ ] GitHub pe push kiya
-  [ ] Render pe deploy kiya
+Database:
+  [ ] schema.sql run
+  [ ] migrate_v1_to_v2.sql run
+  [ ] migration_duels.sql run
+  [ ] migration_v2_2.sql run
+  [ ] migration_website_sync.sql run
 
-First-time Commands:
-  [ ] !sendverification → #verification mein chalaya
-  [ ] !verifyall → existing members ko DM bheja
-  [ ] !inactivity → report check ki
+First-Run Commands:
+  [ ] !setweek "Week 1" YYYY-MM-DD YYYY-MM-DD
+  [ ] !setmonth "Month 1" YYYY-MM-DD YYYY-MM-DD
+  [ ] !addproblem ... (add today's problems)
+  [ ] !sendverification (post embed in #verification)
+  [ ] !verifyall (DM existing members)
+  [ ] !syncultimate (populate website mirror)
+  [ ] !setcookie ... (if using AtCoder)
+  [ ] !inactivitycheck (verify report works)
+  [ ] !contestcheck (verify reminders work)
 ```
 
 ---
 
-*CP-Bot v5 — Binary Beats Discord Server*
-*Made with ❤️ for competitive programmers*
+*CP-Bot v7 — Binary Beats*
+*[README.md](README.md) has the full API reference and architecture documentation.*
